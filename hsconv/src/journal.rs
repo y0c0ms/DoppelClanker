@@ -129,6 +129,16 @@ impl Journal {
     /// resumes. Inactive branches are excluded, matching session-migrate's
     /// "opaque:inactive_omp_branch_entry" accounting.
     pub fn messages(&self) -> Vec<Msg<'_>> {
+        // A message without its own time takes the session header's time, and
+        // only if that is missing too, the current time. Never the epoch: an
+        // epoch timestamp shows as 1970 in every harness that displays it.
+        let fallback_ms = self
+            .timestamp()
+            .and_then(parse_iso_ms)
+            .unwrap_or_else(|| std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0));
         let by_id: std::collections::HashMap<&str, &Map<String, Value>> =
             self.records.iter().filter_map(|r| r.get("id").and_then(Value::as_str).map(|id| (id, r))).collect();
         let leaf = self
@@ -152,7 +162,7 @@ impl Journal {
         chain
             .into_iter()
             .filter(|r| r.get("type").and_then(Value::as_str) == Some("message"))
-            .filter_map(|r| Msg::from_record(r))
+            .filter_map(|r| Msg::from_record(r, fallback_ms))
             .collect()
     }
 
@@ -191,7 +201,7 @@ pub struct Msg<'a> {
 }
 
 impl<'a> Msg<'a> {
-    fn from_record(r: &'a Map<String, Value>) -> Option<Self> {
+    fn from_record(r: &'a Map<String, Value>, fallback_ms: i64) -> Option<Self> {
         let message = r.get("message")?.as_object()?;
         let role = message.get("role")?.as_str()?;
         let id = r.get("id")?.as_str()?;
@@ -199,7 +209,7 @@ impl<'a> Msg<'a> {
             .get("timestamp")
             .and_then(Value::as_i64)
             .or_else(|| r.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms))
-            .unwrap_or(0);
+            .unwrap_or(fallback_ms);
         let content = match message.get("content") {
             Some(Value::Array(a)) => a.iter().collect(),
             Some(v @ Value::String(_)) => vec![v],

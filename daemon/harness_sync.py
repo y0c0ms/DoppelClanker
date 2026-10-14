@@ -59,15 +59,31 @@ PI_AGENT = Path(os.environ.get("PI_AGENT_DIR", HOME / ".pi" / "agent"))
 OPENCODE_DB = Path(os.environ.get("OPENCODE_DB", HOME / ".local" / "share" / "opencode" / "opencode.db"))
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude"))
 
-SMIGRATE = os.environ.get("SMIGRATE", str(Path(sys.executable).parent / "Scripts" / "smigrate.exe"))
-OPENCODE = os.environ.get("OPENCODE_BIN", shutil.which("opencode") or str(HOME / ".bun" / "bin" / "opencode.exe"))
+def find_tool(name: str, env: str, extra: list[Path] | None = None) -> str:
+    """Locate a tool on any OS: explicit env var, then PATH, then the
+    per-user bin dirs. Windows names get .exe; Linux and macOS do not.
+    A missing tool returns a path that does not exist; callers check it."""
+    if os.environ.get(env):
+        return os.environ[env]
+    found = shutil.which(name) or shutil.which(name + ".exe")
+    if found:
+        return found
+    for c in list(extra or []) + [HOME / "bin" / name, HOME / "bin" / (name + ".exe")]:
+        if c.exists():
+            return str(c)
+    return str(HOME / "bin" / name)
+
+
+SMIGRATE = find_tool("smigrate", "SMIGRATE", [Path(sys.executable).parent / "Scripts" / "smigrate.exe",
+                                             Path(sys.executable).parent / "smigrate"])
+OPENCODE = find_tool("opencode", "OPENCODE_BIN", [HOME / ".bun" / "bin" / "opencode",
+                                                  HOME / ".bun" / "bin" / "opencode.exe"])
 
 POLL_SECONDS = float(os.environ.get("HARNESS_SYNC_POLL", "5"))
 QUIET_SECONDS = float(os.environ.get("HARNESS_SYNC_QUIET", "20"))
 # Only sessions changed within this window are mirrored. Keeps the first pass
 # bounded (199 omp sessions / 1.5 GB here) and the pickers free of stale copies.
 MAX_AGE_DAYS = float(os.environ.get("HARNESS_SYNC_MAX_AGE_DAYS", "14"))
-MIRROR_PREFIX = "[mirror] "
 NAMESPACE = uuid.UUID("5e55a0b1-7c3e-4d2a-9f1b-0a12ab34cd56")  # stable, project-local
 
 log = logging.getLogger("harness-sync")
@@ -136,23 +152,41 @@ def jsonl_sessions(agent_dir: Path) -> list[Path]:
 
 
 def jsonl_session_meta(path: Path) -> tuple[str, str, str]:
-    """(session_id, cwd, title) from the header records of an omp/pi journal."""
+    """(session_id, cwd, title) from an omp/pi journal.
+
+    Title precedence: explicit title records (header slot, session/title
+    records), else the first user message. Never the filename: the filename
+    carries a timestamp, which is what showed up as the mirror name."""
     sid = OMP_PI_NAME.match(path.name)["id"]
-    cwd, title = "", ""
+    cwd, header_title, slot_title, fallback = "", "", "", ""
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for i, line in enumerate(fh):
-            if i > 3:
-                break
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if rec.get("type") == "session":
+            kind = rec.get("type")
+            if kind == "session":
                 cwd = rec.get("cwd", "") or cwd
-                title = rec.get("title") or title
-            elif rec.get("type") == "title":
-                title = (rec.get("title") or "").strip() or title
-    return sid, cwd, title
+                header_title = rec.get("title") or header_title
+            elif kind == "title":
+                # The title record (omp's slot, or a rename) is the name the user
+                # sees. It must win over the header, which can hold an older name.
+                slot_title = (rec.get("title") or "").strip() or slot_title
+            elif kind == "session_info" and rec.get("name"):
+                slot_title = str(rec["name"]).strip() or slot_title
+            elif kind == "message" and not fallback:
+                msg = rec.get("message") or {}
+                if msg.get("role") == "user":
+                    content = msg.get("content")
+                    text = content if isinstance(content, str) else next(
+                        (b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text"), "") if isinstance(content, list) else ""
+                    text = text.strip()
+                    if text and not text.startswith("<"):
+                        fallback = text.split("\n", 1)[0][:80]
+    title = slot_title or header_title
+    return sid, cwd, title or fallback
 
 
 CLAUDE_NAME = re.compile(r"^(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
@@ -165,12 +199,20 @@ def claude_sessions() -> list[Path]:
     return [p for p in root.glob("*/*.jsonl") if CLAUDE_NAME.match(p.name)]
 
 
+CLAUDE_BANNER = ("This session is being continued", "Caveat:")
+
+
 def claude_session_meta(path: Path) -> tuple[str, str, str, bool]:
-    """(session_id, cwd, title, has_user_turn). Title is the first user prompt;
-    Claude Code has no title record. Sessions with no user turn (warm-up files
-    Claude Code creates for every launch) are not resumable and are skipped."""
+    """(session_id, cwd, title, has_user_turn).
+
+    Title precedence, as Claude Code's own reader applies it: `custom-title`
+    (set by /rename or -n, latest wins), then `ai-title` (its generated name),
+    then `agent-name`, then the first real user prompt. Continuation
+    banners and tool/command wrappers are not titles. Sessions with no user
+    turn (warm-up files Claude Code creates for every launch) are not
+    resumable and are skipped."""
     sid = CLAUDE_NAME.match(path.name)["id"]
-    cwd, title, has_user = "", "", False
+    cwd, custom_title, ai_title, agent_name, first_prompt, has_user = "", "", "", "", "", False
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
@@ -178,18 +220,61 @@ def claude_session_meta(path: Path) -> tuple[str, str, str, bool]:
             except json.JSONDecodeError:
                 continue
             cwd = cwd or rec.get("cwd", "")
-            if rec.get("type") == "user" and not rec.get("isMeta"):
+            kind = rec.get("type")
+            if kind == "custom-title" and rec.get("customTitle"):
+                custom_title = rec["customTitle"].strip()
+            elif kind == "ai-title" and rec.get("aiTitle"):
+                ai_title = rec["aiTitle"].strip()
+            elif kind == "agent-name" and rec.get("agentName"):
+                agent_name = rec["agentName"].strip()
+            elif kind == "user" and not rec.get("isMeta"):
                 msg = rec.get("message") or {}
                 content = msg.get("content")
                 text = content if isinstance(content, str) else next(
                     (b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"), "") if isinstance(content, list) else ""
+                text = text.strip()
                 if text and not text.startswith("<"):
                     has_user = True
-                    if not title:
-                        title = text.strip().split("\n", 1)[0][:80]
-            if title and cwd and has_user:
-                break
+                    if not first_prompt and not text.startswith(CLAUDE_BANNER):
+                        first_prompt = text.split("\n", 1)[0][:80]
+    title = custom_title or ai_title or agent_name or first_prompt
     return sid, cwd, title, has_user
+
+
+OPENCODE_DEFAULT_TITLE = re.compile(r"^New session - \d{4}-\d{2}-\d{2}T[\d:.]+Z$")
+
+
+def clean_opencode_title(title: str | None) -> str:
+    """O-penCode names an untitled session 'New session - <ISO timestamp>'.
+    That date is not a name, so treat it as untitled and let the caller fall
+    back to the first prompt. Anything else is returned unchanged."""
+    t = (title or "").strip()
+    return "" if OPENCODE_DEFAULT_TITLE.match(t) else t
+
+
+def opencode_first_prompt(sid: str) -> str:
+    """First real user prompt of an OpenCode session, read read-only from the
+    message and part tables. Empty string if there is none."""
+    if not OPENCODE_DB.exists():
+        return ""
+    con = sqlite3.connect(f"file:{OPENCODE_DB.as_posix()}?mode=ro", uri=True, timeout=5)
+    try:
+        rows = con.execute(
+            "select m.data, p.data from message m join part p on p.message_id = m.id "
+            "where m.session_id = ? order by m.time_created, p.time_created", (sid,)).fetchall()
+    finally:
+        con.close()
+    for msg_json, part_json in rows:
+        try:
+            msg, part = json.loads(msg_json), json.loads(part_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if msg.get("role") != "user" or part.get("type") != "text":
+            continue
+        text = (part.get("text") or "").strip()
+        if text and not text.startswith("<"):
+            return text.split("\n", 1)[0][:80]
+    return ""
 
 
 def opencode_sessions() -> list[tuple[str, float, str, str]]:
@@ -340,8 +425,41 @@ def sanitize_claude(src: Path, dst: Path) -> int:
     return cut
 
 
+def prepare_opencode_source(sid: str, scratch: Path) -> tuple[Path, str]:
+    """Export an OpenCode session and convert it to an omp-format journal.
+
+    `opencode export` prints a banner line before the JSON, so the export is
+    saved as-is and `hsconv from-opencode` skips everything before the first
+    '{'. The journal is written under scratch and is never a source itself."""
+    scratch.mkdir(parents=True, exist_ok=True)
+    export = scratch / f"{sid}.export.txt"
+    r = run([OPENCODE, "export", sid])
+    if r.returncode != 0 or "{" not in r.stdout:
+        raise RuntimeError(f"opencode export {sid} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+    export.write_text(r.stdout, encoding="utf-8")
+    journal = scratch / f"{sid}.journal.jsonl"
+    r = run([HSCONV, "from-opencode", str(export), "--out", str(journal)])
+    if r.returncode != 0:
+        raise RuntimeError(f"hsconv from-opencode failed: {r.stderr.strip()[-300:]}")
+    cwd = ""
+    first = journal.read_text(encoding="utf-8").splitlines()[0]
+    cwd = json.loads(first).get("cwd", "")
+    return journal, cwd
+
+
 def prepare_source(fmt: str, key: str, scratch: Path) -> tuple[Path, str]:
     """Return (path session-migrate should read, cwd) for a source."""
+    if fmt == "opencode":
+        return prepare_opencode_source(key, scratch / "oc")
+    if fmt == "claude" and Path(HSCONV).exists():
+        src = Path(key)
+        scratch.mkdir(parents=True, exist_ok=True)
+        journal = scratch / f"{src.stem}.claude-journal.jsonl"
+        r = run([HSCONV, "from-claude", str(src), "--out", str(journal)])
+        if r.returncode != 0:
+            raise RuntimeError(f"hsconv from-claude failed: {r.stderr.strip()[-300:]}")
+        _, cwd, _, _ = claude_session_meta(src)
+        return journal, cwd
     if fmt in ("omp", "pi") and Path(HSCONV).exists():
         src = Path(key)
         _, cwd, _ = jsonl_session_meta(src)
@@ -394,12 +512,12 @@ def prepare_source(fmt: str, key: str, scratch: Path) -> tuple[Path, str]:
 # -------------------------------------------------------- installation
 
 def set_jsonl_title(path: Path, title: str, fmt: str) -> None:
-    """Prefix the picker title so a mirror is recognisable. omp uses a fixed
-    256-byte slot on line 1; pi uses session_info / header title."""
+    """Set the picker title to the original conversation's name (no prefix,
+    no date). omp uses a fixed 256-byte slot on line 1; pi uses the header title."""
     lines = path.read_text(encoding="utf-8").split("\n")
     if fmt == "omp" and lines and '"type"' in lines[0] and '"title"' in lines[0] and json.loads(lines[0]).get("type") == "title":
         rec = json.loads(lines[0])
-        rec["title"] = (MIRROR_PREFIX + (rec.get("title") or title)).strip()
+        rec["title"] = (title or rec.get("title") or "").strip()
         raw = json.dumps(rec, ensure_ascii=False)
         pad = 256 - len(raw.encode("utf-8")) - 1
         if pad < 0:  # title too long for the slot; truncate
@@ -411,19 +529,21 @@ def set_jsonl_title(path: Path, title: str, fmt: str) -> None:
         for i, line in enumerate(lines[:3]):
             if '"type": "session"' in line or line.startswith('{"type":"session"'):
                 rec = json.loads(line)
-                rec["title"] = MIRROR_PREFIX + (rec.get("title") or title)
+                rec["title"] = title or rec.get("title") or ""
                 lines[i] = json.dumps(rec, ensure_ascii=False)
                 break
     path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
-HSCONV = os.environ.get("HSCONV", str(HOME / "bin" / "hsconv.exe"))
+HSCONV = find_tool("hsconv", "HSCONV")
 
 
 def _journal_source(src_fmt: str) -> bool:
-    """omp and Pi journals are converted natively by hsconv (Rust). Claude
-    sources still go through session-migrate until that adapter is ported."""
-    return src_fmt in ("omp", "pi") and Path(HSCONV).exists()
+    """omp, Pi and OpenCode sources are converted natively by hsconv (Rust).
+    OpenCode is exported and turned into an omp-format journal first (see
+    prepare_opencode_source), so it takes the same native path. Claude sources
+    are converted by `hsconv from-claude` (see prepare_source)."""
+    return src_fmt in ("omp", "pi", "opencode", "claude") and Path(HSCONV).exists()
 
 
 def install_jsonl(target: str, src_path: Path, src_fmt: str, cwd: str, mirror_id: str, title: str) -> Path:
@@ -462,7 +582,7 @@ def _install_jsonl_hsconv(target: str, src_path: Path, cwd: str, mirror_id: str,
     """hsconv writes straight into the store (atomic rename inside), with the
     deterministic mirror id, so a re-run replaces the same file."""
     root = {"pi": PI_AGENT, "omp": OMP_AGENT, "claude": CLAUDE_DIR}[target]
-    mtitle = MIRROR_PREFIX + title
+    mtitle = title
     if target == "claude":
         cmd = [HSCONV, "to-claude", str(src_path), "--out-dir", str(root / "projects"), "--id", mirror_id]
     elif target == "pi":
@@ -484,7 +604,7 @@ def install_opencode(src_path: Path, src_fmt: str, cwd: str, mirror_id: str, tit
     with tempfile.TemporaryDirectory(dir=SCRATCH, prefix="oc-") as tmp:
         if _journal_source(src_fmt):
             bundle = Path(tmp) / "bundle.json"
-            r = run([HSCONV, "to-opencode", str(src_path), "--out", str(bundle), "--id", mirror_id, "--title", MIRROR_PREFIX + title])
+            r = run([HSCONV, "to-opencode", str(src_path), "--out", str(bundle), "--id", mirror_id, "--title", title])
             if r.returncode != 0:
                 raise RuntimeError(f"hsconv -> opencode failed: {r.stderr.strip()[-400:]}")
             r = run([OPENCODE, "import", str(bundle)])
@@ -498,7 +618,7 @@ def install_opencode(src_path: Path, src_fmt: str, cwd: str, mirror_id: str, tit
             raise RuntimeError(f"session-migrate -> opencode failed: {r.stderr.strip()[-400:]}")
         data = json.loads(bundle.read_text(encoding="utf-8"))
         data["info"]["id"] = mirror_id
-        data["info"]["title"] = MIRROR_PREFIX + (data["info"].get("title") or title)
+        data["info"]["title"] = title or data["info"].get("title") or ""
         for m in data.get("messages", []):
             if isinstance(m, dict):
                 if "sessionID" in m:
@@ -569,7 +689,7 @@ def source_label(src: Source) -> str:
     return src.key if src.fmt == "opencode" else Path(src.key).name
 
 
-HSLOCK = os.environ.get("HSLOCK", str(HOME / "bin" / "hslock.exe"))
+HSLOCK = find_tool("hslock", "HSLOCK")
 
 
 def lock_holder(conversation_id: str) -> str | None:
@@ -695,7 +815,9 @@ def _scan_journals(state: State, now: float, fmt: str, paths: list[Path], instal
         if not resumable:
             continue
         src.last_hash = h
-        changed[key] = (src, title or path.stem)
+        # No filename fallback: path.stem is "<timestamp>_<uuid>" and would put
+        # the date into the mirror's name. Untitled sessions get a neutral name.
+        changed[key] = (src, title or "untitled session")
 
 
 def scan(state: State, now: float) -> dict[str, tuple[Source, str]]:
@@ -714,7 +836,7 @@ def scan(state: State, now: float) -> dict[str, tuple[Source, str]]:
 
     if installed["opencode"]:
         for sid, updated, directory, title in opencode_sessions():
-            if sid in state.mirror_keys or title.startswith(MIRROR_PREFIX) or now - updated > MAX_AGE_DAYS * 86400:
+            if sid in state.mirror_keys or now - updated > MAX_AGE_DAYS * 86400:
                 continue
             src = state.sources.setdefault(sid, Source(fmt="opencode", key=sid))
             if updated > src.last_seen_change:
@@ -725,7 +847,8 @@ def scan(state: State, now: float) -> dict[str, tuple[Source, str]]:
             if h == src.last_hash and len(src.mirrors) == sum(1 for t in TARGETS if t != "opencode" and installed[t]):
                 continue
             src.last_hash = h
-            changed[sid] = (src, title or sid)
+            name = clean_opencode_title(title) or opencode_first_prompt(sid)
+            changed[sid] = (src, name or "untitled session")
 
     state._installed = {k for k, v in installed.items() if v}  # type: ignore[attr-defined]
     return changed

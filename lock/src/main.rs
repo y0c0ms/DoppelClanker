@@ -91,9 +91,29 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(not(windows))]
+/// Unix (Linux and macOS): signal 0 probes existence without delivering a
+/// signal. EPERM means the process exists but belongs to another user, so it
+/// is alive. ESRCH means it is gone. /proc is not used: macOS has none.
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    if pid == 0 {
+        return false;
+    }
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    unsafe {
+        if kill(pid as i32, 0) == 0 {
+            return true;
+        }
+    }
+    io::Error::last_os_error().raw_os_error() == Some(1) // EPERM
+}
+
+#[cfg(not(any(windows, unix)))]
+fn pid_alive(_pid: u32) -> bool {
+    // Unknown platform: assume alive so no lock is silently stolen.
+    true
 }
 
 fn safe_id(id: &str) -> String {
@@ -126,12 +146,34 @@ fn holder(id: &str) -> Option<Lock> {
     if pid_alive(l.pid) { Some(l) } else { None }
 }
 
+/// A lock file that exists but does not parse (empty, truncated, or garbage)
+/// has no live owner. It is treated as stale everywhere, so `check` and
+/// `claim` agree. Before this, `check` said free while `claim` refused with
+/// holder "? ?", and the conversation stayed wedged until a manual `sweep`.
+fn lock_state(p: &Path) -> LockState {
+    match fs::read_to_string(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => LockState::Absent,
+        Err(_) => LockState::Corrupt,
+        Ok(s) => match parse(&s) {
+            Some(l) => LockState::Held(l),
+            None => LockState::Corrupt,
+        },
+    }
+}
+
+enum LockState {
+    Absent,
+    Corrupt,
+    Held(Lock),
+}
+
 /// Atomically replace a stale lock file. Rename of a freshly created temp
 /// file over the stale one is atomic on NTFS and POSIX; whichever claimer's
 /// rename lands last owns the file, and we verify ownership by reading it
 /// back, so exactly one claimer sees its own line.
 fn take_stale(p: &Path, line: &str, harness: &str, pid: u32) -> bool {
-    let tmp = p.with_extension(format!("tmp{pid}"));
+    // Unique temp name per call, so two claimers never write the same temp file.
+    let tmp = p.with_extension(format!("tmp{pid}-{}", now_nanos()));
     if fs::write(&tmp, line).is_err() {
         return false;
     }
@@ -142,6 +184,10 @@ fn take_stale(p: &Path, line: &str, harness: &str, pid: u32) -> bool {
     matches!(read_lock(p), Some(l) if l.harness == harness && l.pid == pid)
 }
 
+fn now_nanos() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+}
+
 fn claim(id: &str, harness: &str, pid: u32, target: &str, force: bool) -> i32 {
     let dir = lock_dir();
     if fs::create_dir_all(&dir).is_err() {
@@ -150,30 +196,30 @@ fn claim(id: &str, harness: &str, pid: u32, target: &str, force: bool) -> i32 {
     }
     let p = lock_path(id);
     let line = format!("{harness} {pid} {} {target}\n", now());
-    match read_lock(&p) {
-        Some(l) if l.harness == harness && l.pid == pid => {
+    match lock_state(&p) {
+        LockState::Held(l) if l.harness == harness && l.pid == pid => {
             // re-entrant: next turn in the same window refreshes the stamp
             let _ = fs::write(&p, &line);
             println!("{} {}", l.harness, l.pid);
             return 0;
         }
-        Some(l) if pid_alive(l.pid) && !force => {
+        LockState::Held(l) if pid_alive(l.pid) && !force => {
             println!("{} {}", l.harness, l.pid);
             return 2;
         }
-        Some(_) => {
-            // stale (dead pid) or --force: atomic takeover
+        LockState::Held(_) | LockState::Corrupt => {
+            // stale (dead pid), unparseable, or --force: atomic takeover
             if take_stale(&p, &line, harness, pid) {
                 println!("{harness} {pid}");
                 return 0;
             }
-            match read_lock(&p) {
-                Some(l) => println!("{} {}", l.harness, l.pid),
-                None => println!("? ?"),
+            match lock_state(&p) {
+                LockState::Held(l) => println!("{} {}", l.harness, l.pid),
+                _ => println!("? ?"),
             }
             return 2;
         }
-        None => {}
+        LockState::Absent => {}
     }
     match fs::OpenOptions::new().write(true).create_new(true).open(&p) {
         Ok(mut f) => {
