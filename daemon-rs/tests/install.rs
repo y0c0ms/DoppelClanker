@@ -100,3 +100,21 @@ fn an_older_mirror_with_a_different_timestamp_is_removed() {
     assert!(!stale.exists(), "the stale copy with an old timestamp must be removed");
     assert_eq!(walk_jsonl(&store).len(), 1, "exactly one mirror must remain");
 }
+
+#[test]
+fn a_claude_mirror_lands_under_projects_with_a_uuid_name() {
+    // The Claude store is <claude>/projects/<bucket>/<uuid>.jsonl. The mirror name
+    // must be a bare uuid, the form Claude Code and claude_sessions() expect.
+    let d = sandbox("claude");
+    let src = journal(&d);
+    let claude = d.join("claude");
+    let out = harness_sync::install::install_journal(
+        &hsconv(), &src,
+        InstallTarget::Claude { claude_dir: claude.clone() },
+        "/tmp/proj", "5e55a0b1-7c3e-4d2a-9f1b-0a12ab34cd56", "Claude mirror").unwrap();
+    assert!(out.starts_with(claude.join("projects")), "{}", out.display());
+    let name = out.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.ends_with(".jsonl"));
+    let stem = name.trim_end_matches(".jsonl");
+    assert!(uuid::Uuid::parse_str(stem).is_ok(), "the file must be named by a uuid, got {stem}");
+}

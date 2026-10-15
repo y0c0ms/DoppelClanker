@@ -11,6 +11,8 @@ pub enum InstallTarget {
     Pi { agent_dir: PathBuf },
     /// omp journal store: `<agent_dir>/sessions/<bucket>/<file>.jsonl`.
     Omp { agent_dir: PathBuf, home: PathBuf },
+    /// Claude Code store: `<claude_dir>/projects/<bucket>/<uuid>.jsonl`.
+    Claude { claude_dir: PathBuf },
 }
 
 /// Convert `src` (an omp/Pi journal) into the target store, with a deterministic
@@ -35,11 +37,17 @@ pub fn install_journal(
             "sessions", "to-omp", agent_dir,
             vec!["--home".into(), home.display().to_string()],
         ),
+        InstallTarget::Claude { claude_dir } => ("projects", "to-claude", claude_dir, vec![]),
     };
     let out_dir = scratch.join(sub);
     let mut cmd = Command::new(hsconv);
-    cmd.arg(verb).arg(src).arg("--out-dir").arg(&out_dir)
-        .args(["--id", mirror_id, "--title", title]).args(&extra);
+    cmd.arg(verb).arg(src).arg("--out-dir").arg(&out_dir).args(&extra);
+    // to-claude takes no title; every other target gets --id and --title.
+    if verb == "to-claude" {
+        cmd.args(["--id", mirror_id]);
+    } else {
+        cmd.args(["--id", mirror_id, "--title", title]);
+    }
     let out = cmd.output().map_err(|e| format!("cannot run hsconv: {e}"))?;
     if !out.status.success() {
         let _ = fs::remove_dir_all(&scratch);
