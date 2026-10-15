@@ -8,3 +8,4 @@ pub mod pass;
 pub mod scan;
 pub mod state;
 pub mod titles;
+pub mod tui;
