@@ -125,3 +125,13 @@ pub fn export_and_convert(
     }
     Ok(journal)
 }
+
+/// O-penCode names an untitled session "New session - <ISO timestamp>". That is not a
+/// name, so it is treated as untitled and the caller falls back to the first prompt.
+pub fn clean_title(title: &str) -> String {
+    let t = title.trim();
+    let is_default = t.strip_prefix("New session - ").map_or(false, |rest| {
+        rest.len() >= 20 && rest.ends_with('Z') && rest.as_bytes()[4] == b'-' && rest.as_bytes()[10] == b'T'
+    });
+    if is_default { String::new() } else { t.to_string() }
+}

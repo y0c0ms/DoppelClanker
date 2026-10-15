@@ -17,6 +17,8 @@ struct Env {
     omp: PathBuf,
     pi: PathBuf,
     claude: PathBuf,
+    opencode_db: PathBuf,
+    opencode_bin: PathBuf,
     hsconv: PathBuf,
     hslock: PathBuf,
     quiet_secs: f64,
@@ -33,6 +35,8 @@ impl Env {
             omp: get("OMP_AGENT_DIR", home.join(".omp/agent")),
             pi: get("PI_AGENT_DIR", home.join(".pi/agent")),
             claude: get("CLAUDE_CONFIG_DIR", home.join(".claude")),
+            opencode_db: get("OPENCODE_DB", home.join(".local/share/opencode/opencode.db")),
+            opencode_bin: get("OPENCODE_BIN", PathBuf::from("opencode")),
             hsconv: get("HSCONV", home.join("bin/hsconv")),
             hslock: get("HSLOCK", home.join("bin/hslock")),
             quiet_secs: num("HARNESS_SYNC_QUIET", 20.0),
@@ -128,12 +132,87 @@ fn scan(env: &Env, state: &mut State) -> Vec<PassSource> {
             out.push(PassSource { key, title: if title.is_empty() { "untitled".into() } else { title } });
         }
     }
+    out.extend(scan_opencode(env, state, now));
     out
+}
+
+/// O-penCode sessions that changed. Same rules as the Python: live sessions only,
+/// no sessions older than the window, wait for quiet, and re-sync only when
+/// time_updated moved. The title is the store's title, or the first prompt when the
+/// store has only the default name.
+fn scan_opencode(env: &Env, state: &mut State, now: f64) -> Vec<PassSource> {
+    let mut out = Vec::new();
+    if !env.opencode_db.exists() {
+        return out;
+    }
+    for s in harness_sync::opencode::sessions(&env.opencode_db) {
+        if state.mirror_keys.contains(&s.id) || now - s.updated > env.max_age_secs {
+            continue;
+        }
+        let src = state.sources.entry(s.id.clone()).or_insert_with(|| Source::new("opencode", &s.id));
+        if s.updated > src.last_seen_change {
+            src.last_seen_change = s.updated;
+        }
+        if now - src.last_seen_change < env.quiet_secs {
+            continue;
+        }
+        let stamp = format!("{:.3}", s.updated);
+        if stamp == src.last_hash {
+            continue;
+        }
+        src.last_hash = stamp;
+        let title = harness_sync::opencode::clean_title(&s.title);
+        let title = if title.is_empty() {
+            let p = harness_sync::opencode::first_prompt(&env.opencode_db, &s.id);
+            if p.is_empty() { "untitled session".to_string() } else { p }
+        } else {
+            title
+        };
+        out.push(PassSource { key: s.id.clone(), title });
+    }
+    out
+}
+
+/// Mirror an O-penCode session into the omp store. The session is exported and
+/// converted to a journal, then written as an omp file with the same id rule as the
+/// file-store mirrors. An O-penCode session has no file, so there is no cycle risk.
+fn sync_opencode(env: &Env, state: &mut State, s: &PassSource) -> Result<(), String> {
+    let target = "omp";
+    let mirror_id = mirror_uuid(&s.key, target);
+    let scratch = env.state_dir.join("scratch").join("oc");
+    let conv = s.key.clone();
+    let outcome = with_claim(&env.hslock, None, &conv, "daemon", std::process::id(), &s.key, || {
+        let journal = harness_sync::opencode::export_and_convert(&env.opencode_bin, &env.hsconv, &s.key, &scratch)?;
+        install_journal(
+            &env.hsconv, &journal,
+            InstallTarget::Omp { agent_dir: env.omp.clone(), home: env.omp.parent().unwrap_or(&env.omp).to_path_buf() },
+            "/", &mirror_id, &s.title,
+        )
+    });
+    let installed = match outcome {
+        ClaimOutcome::Skipped(holder) => return Err(format!("held by {holder}; will retry")),
+        ClaimOutcome::Ran(r) => r?,
+    };
+    let src = state.sources.get_mut(&s.key).ok_or("unknown source")?;
+    let path = installed.display().to_string();
+    state.mirror_keys.insert(path.clone());
+    src.mirrors.insert(target.to_string(), Mirror {
+        target: target.to_string(),
+        path,
+        source_hash: src.last_hash.clone(),
+        installed_hash: file_hash(&installed).unwrap_or_default(),
+        diverged: false,
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(())
 }
 
 /// Mirror one changed source into the other store. Claims the conversation while
 /// it writes, so a harness turn cannot start mid-mirror.
 fn sync_one(env: &Env, state: &mut State, s: &PassSource) -> Result<(), String> {
+    if state.sources.get(&s.key).map(|src| src.fmt.as_str()) == Some("opencode") {
+        return sync_opencode(env, state, s);
+    }
     let (fmt, id) = {
         let src = state.sources.get(&s.key).ok_or("unknown source")?;
         (src.fmt.clone(), discovery::parse_omp_name(Path::new(&s.key).file_name().and_then(|n| n.to_str()).unwrap_or("")).unwrap_or_default())
