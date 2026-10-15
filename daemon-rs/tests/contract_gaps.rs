@@ -17,8 +17,23 @@ fn sandbox(name: &str) -> PathBuf {
     d
 }
 
+/// The hslock binary, built on demand so the test does not depend on a release build
+/// that a fresh checkout does not have. Panics with the cargo output if the build fails.
 fn hslock() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../lock/target/release/hslock")
+    use std::sync::OnceLock;
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let lock_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../lock");
+        let out = Command::new("cargo")
+            .args(["build", "--quiet", "--manifest-path"])
+            .arg(lock_dir.join("Cargo.toml"))
+            .output()
+            .expect("run cargo to build hslock");
+        assert!(out.status.success(), "building hslock failed:
+{}",
+                String::from_utf8_lossy(&out.stderr));
+        lock_dir.join("target").join("debug").join("hslock")
+    }).clone()
 }
 
 #[test]
