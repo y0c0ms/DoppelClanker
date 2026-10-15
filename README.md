@@ -16,7 +16,7 @@ The lock is enforced inside each harness:
 
 | Harness | Hook |
 |---|---|
-| omp and Pi | `hooks/harness-sync-lock.ts`, a shared extension. Claims on `turn_start`, releases on `turn_end` and session lifecycle events. |
+| omp and Pi | `hooks/omp-lock-shim.ts`, a thin omp extension that forwards events to `hslock hook`. Claims on `turn_start`, releases on `turn_end` and session lifecycle events. |
 | Claude Code | `hooks/claude-hook.sh`, wired to `UserPromptSubmit` (claim, block on refusal) and `Stop` / `SessionEnd` (release). |
 | OpenCode | A plugin that claims on `chat.message` and releases on `session.idle` and `session.deleted`. |
 
