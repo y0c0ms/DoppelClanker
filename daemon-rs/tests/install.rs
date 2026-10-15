@@ -1,0 +1,102 @@
+//! Mirror install, ported from daemon/harness_sync.py install_jsonl and
+//! _install_jsonl_hsconv. Runs the real hsconv binary. Writes only inside a
+//! private temp store; the real omp/pi/claude stores are never touched.
+
+use harness_sync::install::{install_journal, InstallTarget};
+use std::fs;
+use std::path::PathBuf;
+
+fn hsconv() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hsconv/target/release/hsconv")
+}
+
+fn sandbox(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("hs-install-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// A minimal omp journal: header plus one user message.
+fn journal(dir: &PathBuf) -> PathBuf {
+    let p = dir.join("src.jsonl");
+    let id = "aaaaaaaa-1111-2222-3333-444444444444";
+    let body = format!(
+        "{}\n{}\n",
+        format!(r#"{{"type":"session","version":3,"id":"{id}","timestamp":"2026-10-01T10:00:00.000Z","cwd":"/tmp/proj"}}"#),
+        r#"{"type":"message","id":"m1","parentId":null,"timestamp":"2026-10-01T10:00:01.000Z","message":{"role":"user","content":"hello install"}}"#,
+    );
+    fs::write(&p, body).unwrap();
+    p
+}
+
+#[test]
+fn pi_mirror_is_written_with_the_title_and_a_stable_name() {
+    let d = sandbox("pi");
+    let src = journal(&d);
+    let store = d.join("pi-agent");
+    let out = install_journal(&hsconv(), &src, InstallTarget::Pi { agent_dir: store.clone() },
+                              "/tmp/proj", "mirror-id-1", "Mirror title").unwrap();
+    assert!(out.starts_with(&store), "the mirror must land inside the given store");
+    let text = fs::read_to_string(&out).unwrap();
+    assert!(text.contains("Mirror title"), "the title must be written into the mirror");
+}
+
+#[test]
+fn reinstalling_replaces_the_same_mirror_not_a_copy() {
+    let d = sandbox("replace");
+    let src = journal(&d);
+    let store = d.join("pi-agent");
+    let t = || InstallTarget::Pi { agent_dir: store.clone() };
+    let a = install_journal(&hsconv(), &src, t(), "/tmp/proj", "mirror-id-2", "First").unwrap();
+    let b = install_journal(&hsconv(), &src, t(), "/tmp/proj", "mirror-id-2", "Second").unwrap();
+    assert_eq!(a, b, "same mirror id must map to the same file");
+    let count = walk_jsonl(&store).len();
+    assert_eq!(count, 1, "a re-install must not leave a second copy");
+    assert!(fs::read_to_string(&b).unwrap().contains("Second"));
+}
+
+fn walk_jsonl(root: &PathBuf) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(rd) = fs::read_dir(root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk_jsonl(&p));
+            } else if p.extension().map_or(false, |x| x == "jsonl") {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_failed_converter_is_an_error_and_writes_nothing() {
+    let d = sandbox("fail");
+    let src = d.join("garbage.jsonl");
+    fs::write(&src, "not a journal\n").unwrap();
+    let store = d.join("pi-agent");
+    let r = install_journal(&hsconv(), &src, InstallTarget::Pi { agent_dir: store.clone() },
+                            "/tmp", "mirror-id-3", "t");
+    assert!(r.is_err(), "a converter failure must surface");
+    assert!(walk_jsonl(&store).is_empty(), "nothing may be written when conversion fails");
+}
+
+#[test]
+fn an_older_mirror_with_a_different_timestamp_is_removed() {
+    // The Python code removes any file ending in <mirror_id>.jsonl, because the
+    // timestamp prefix can differ between runs. Plant an old copy with a
+    // different prefix; after install it must be gone and only one file remains.
+    let d = sandbox("oldts");
+    let src = journal(&d);
+    let store = d.join("pi-agent");
+    let t = || InstallTarget::Pi { agent_dir: store.clone() };
+    let first = install_journal(&hsconv(), &src, t(), "/tmp/proj", "mirror-id-4", "First").unwrap();
+    let bucket = first.parent().unwrap().to_path_buf();
+    let stale = bucket.join("2020-01-01T00-00-00-000Z_mirror-id-4.jsonl");
+    fs::write(&stale, "stale").unwrap();
+    install_journal(&hsconv(), &src, t(), "/tmp/proj", "mirror-id-4", "Second").unwrap();
+    assert!(!stale.exists(), "the stale copy with an old timestamp must be removed");
+    assert_eq!(walk_jsonl(&store).len(), 1, "exactly one mirror must remain");
+}
