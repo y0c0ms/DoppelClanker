@@ -6,6 +6,7 @@ pub mod install;
 pub mod lock;
 pub mod manage;
 pub mod mirror;
+pub mod opencode;
 pub mod pass;
 pub mod scan;
 pub mod state;
