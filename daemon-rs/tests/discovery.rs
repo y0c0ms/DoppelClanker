@@ -22,6 +22,13 @@ fn omp_name_needs_timestamp_and_uuid() {
 }
 
 #[test]
+fn omp_name_rejects_a_bad_timestamp_even_with_a_valid_uuid() {
+    // The uuid is valid; only the timestamp is wrong. This pins the timestamp check.
+    assert!(parse_omp_name(&format!("not-a-timestamp_{ID}.jsonl")).is_none());
+    assert!(parse_omp_name(&format!("2026-10-01T10:00:00.000Z_{ID}.jsonl")).is_none(), "colons instead of dashes");
+}
+
+#[test]
 fn claude_name_is_a_bare_uuid_jsonl() {
     assert!(parse_claude_name(&format!("{ID}.jsonl")).is_some());
     assert!(parse_claude_name("notes.jsonl").is_none());
