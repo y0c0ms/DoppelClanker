@@ -26,6 +26,10 @@ impl Model {
         Model { rows, selected: 0, duplicates: Vec::new(), trivial: Vec::new(), armed: None }
     }
 
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
     pub fn select(&mut self, i: usize) {
         self.selected = i.min(self.rows.len().saturating_sub(1));
     }

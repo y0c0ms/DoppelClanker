@@ -85,7 +85,8 @@ pub fn list_groups(roots: &Roots, state: &State) -> Vec<Group> {
         if state.mirror_keys.contains(&key) {
             continue;
         }
-        by_key.insert(key.clone(), Group::file(fmt, key.clone(), &file_name(&key)));
+        let title = session_title(&key, fmt);
+        by_key.insert(key.clone(), Group::file(fmt, key.clone(), &title));
     }
 
     // Sources recorded in state, with their mirrors. Keep orphans too.
@@ -99,6 +100,18 @@ pub fn list_groups(roots: &Roots, state: &State) -> Vec<Group> {
         }
     }
     by_key.into_values().collect()
+}
+
+/// The name shown for a session: its title from the file, or a neutral name when it
+/// has none. Never the file name, which carries a timestamp.
+fn session_title(path: &str, fmt: &str) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else { return "untitled".into() };
+    let lines: Vec<&str> = text.lines().collect();
+    let title = match fmt {
+        "claude" => crate::titles::claude_title_from_lines(&lines).0,
+        _ => crate::titles::omp_title_from_lines(&lines).0,
+    };
+    if title.is_empty() { "untitled".into() } else { title }
 }
 
 fn file_name(p: &str) -> String {
