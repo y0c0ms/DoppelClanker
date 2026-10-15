@@ -81,3 +81,47 @@ pub fn write_probe(db: &Path) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
+
+/// Export a session with the opencode CLI and convert it to an omp-format journal
+/// with `hsconv from-opencode`, under `scratch`. The export is kept as-is because
+/// the CLI can print a banner before the JSON; the converter skips anything before
+/// the first '{'. A failed export or conversion is an error.
+pub fn export_and_convert(
+    opencode: &Path,
+    hsconv: &Path,
+    session_id: &str,
+    scratch: &Path,
+) -> Result<std::path::PathBuf, String> {
+    use std::process::Command;
+    std::fs::create_dir_all(scratch).map_err(|e| e.to_string())?;
+    let export = scratch.join(format!("{session_id}.export.json"));
+    let journal = scratch.join(format!("{session_id}.journal.jsonl"));
+
+    // Stdout goes straight to the export file, not a pipe. With a pipe the CLI
+    // stopped after 196608 bytes and still exited 0, which truncated a 2.7 MB session.
+    let file = std::fs::File::create(&export).map_err(|e| e.to_string())?;
+    let out = Command::new(opencode)
+        .args(["export", session_id])
+        .stdout(file)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("cannot run opencode export: {e}"))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&export);
+        return Err(format!("opencode export failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+
+    let conv = Command::new(hsconv)
+        .args(["from-opencode"])
+        .arg(&export)
+        .arg("--out")
+        .arg(&journal)
+        .output()
+        .map_err(|e| format!("cannot run hsconv: {e}"))?;
+    let _ = std::fs::remove_file(&export);
+    if !conv.status.success() {
+        let _ = std::fs::remove_file(&journal);
+        return Err(format!("hsconv from-opencode failed: {}", String::from_utf8_lossy(&conv.stderr).trim()));
+    }
+    Ok(journal)
+}
