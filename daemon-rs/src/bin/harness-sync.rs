@@ -1,0 +1,202 @@
+//! harness-sync: Rust replacement for `python daemon/harness_sync.py`.
+//! Modes: `--status` prints the mirror view; `--once` runs one sync pass.
+//! Continuous polling is the same pass repeated on an interval (not yet wired).
+
+use harness_sync::install::{install_journal, InstallTarget};
+use harness_sync::lock::{with_claim, ClaimOutcome};
+use harness_sync::mirror::{file_hash, mirror_uuid};
+use harness_sync::pass::{format_status, PassSource};
+use harness_sync::scan::{should_sync, ScanInput, MIN_BYTES};
+use harness_sync::state::{Mirror, Source, State};
+use harness_sync::{discovery, titles};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+struct Env {
+    state_dir: PathBuf,
+    omp: PathBuf,
+    pi: PathBuf,
+    hsconv: PathBuf,
+    hslock: PathBuf,
+    quiet_secs: f64,
+    max_age_secs: f64,
+}
+
+impl Env {
+    fn from_env() -> Env {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let get = |k: &str, d: PathBuf| std::env::var_os(k).map(PathBuf::from).unwrap_or(d);
+        let num = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        Env {
+            state_dir: get("HARNESS_SYNC_DIR", home.join(".local/share/harness-sync")),
+            omp: get("OMP_AGENT_DIR", home.join(".omp/agent")),
+            pi: get("PI_AGENT_DIR", home.join(".pi/agent")),
+            hsconv: get("HSCONV", home.join("bin/hsconv")),
+            hslock: get("HSLOCK", home.join("bin/hslock")),
+            quiet_secs: num("HARNESS_SYNC_QUIET", 20.0),
+            max_age_secs: num("HARNESS_SYNC_MAX_AGE_DAYS", 14.0) * 86400.0,
+        }
+    }
+    fn state_file(&self) -> PathBuf {
+        self.state_dir.join("state.json")
+    }
+    fn store_for(&self, fmt: &str) -> &Path {
+        if fmt == "omp" { &self.omp } else { &self.pi }
+    }
+}
+
+fn now_secs() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+fn mtime_secs(p: &Path) -> f64 {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Mirrors the daemon created, so a change to them is never treated as a source.
+fn is_mirror(state: &State, key: &str) -> bool {
+    state.mirror_keys.contains(key)
+}
+
+/// Find sources that need a sync, and the title to give their mirror.
+fn scan(env: &Env, state: &mut State) -> Vec<PassSource> {
+    let now = now_secs();
+    let mut out = Vec::new();
+    for (fmt, dir) in [("omp", &env.omp), ("pi", &env.pi)] {
+        if !dir.is_dir() {
+            continue;
+        }
+        let other = if fmt == "omp" { "pi" } else { "omp" };
+        let other_present = if other == "omp" { env.omp.is_dir() } else { env.pi.is_dir() };
+        for path in discovery::jsonl_sessions(dir) {
+            let key = path.display().to_string();
+            if is_mirror(state, &key) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let mtime = mtime_secs(&path);
+            let src = state.sources.entry(key.clone()).or_insert_with(|| Source::new(fmt, &key));
+            if mtime > src.last_seen_change {
+                src.last_seen_change = mtime;
+            }
+            let stamp = format!("{}:{}", meta.len(), mtime);
+            let hash = if stamp == src.last_stamp && !src.last_hash.is_empty() {
+                src.last_hash.clone()
+            } else {
+                let h = file_hash(&path).unwrap_or_default();
+                src.last_stamp = stamp;
+                h
+            };
+            let hash_changed = hash != src.last_hash;
+            let live: Vec<&Mirror> = src.mirrors.values().filter(|m| !m.diverged).collect();
+            let live_current = live.iter().all(|m| m.source_hash == hash);
+            let wanted = if other_present { 1 } else { 0 };
+            let input = ScanInput {
+                size: meta.len(),
+                mtime,
+                now,
+                is_mirror: false,
+                max_age_secs: env.max_age_secs,
+                quiet_secs: env.quiet_secs,
+                hash_changed,
+                live_mirrors_current: live_current,
+                mirror_count: src.mirrors.len(),
+                wanted_mirrors: wanted,
+            };
+            if !should_sync(&input) || meta.len() < MIN_BYTES {
+                continue;
+            }
+            let title = std::fs::read_to_string(&path)
+                .map(|text| {
+                    let lines: Vec<&str> = text.lines().collect();
+                    titles::omp_title_from_lines(&lines).0
+                })
+                .unwrap_or_default();
+            src.last_hash = hash;
+            out.push(PassSource { key, title: if title.is_empty() { "untitled".into() } else { title } });
+        }
+    }
+    out
+}
+
+/// Mirror one changed source into the other store. Claims the conversation while
+/// it writes, so a harness turn cannot start mid-mirror.
+fn sync_one(env: &Env, state: &mut State, s: &PassSource) -> Result<(), String> {
+    let (fmt, id) = {
+        let src = state.sources.get(&s.key).ok_or("unknown source")?;
+        (src.fmt.clone(), discovery::parse_omp_name(Path::new(&s.key).file_name().and_then(|n| n.to_str()).unwrap_or("")).unwrap_or_default())
+    };
+    let target = if fmt == "omp" { "pi" } else { "omp" };
+    let target_store = if target == "pi" { env.pi.clone() } else { env.omp.clone() };
+    let mirror_id = mirror_uuid(&s.key, target);
+    let conv = if id.is_empty() { s.key.clone() } else { id };
+    let src_path = PathBuf::from(&s.key);
+    let cwd = "/".to_string();
+
+    let outcome = with_claim(&env.hslock, None, &conv, "daemon", std::process::id(), &s.key, || {
+        let t = if target == "pi" {
+            InstallTarget::Pi { agent_dir: target_store.clone() }
+        } else {
+            InstallTarget::Omp { agent_dir: target_store.clone(), home: target_store.parent().unwrap_or(&target_store).to_path_buf() }
+        };
+        install_journal(&env.hsconv, &src_path, t, &cwd, &mirror_id, &s.title)
+    });
+    let installed = match outcome {
+        ClaimOutcome::Skipped(holder) => return Err(format!("held by {holder}; will retry")),
+        ClaimOutcome::Ran(r) => r?,
+    };
+    let src = state.sources.get_mut(&s.key).ok_or("unknown source")?;
+    let source_hash = src.last_hash.clone();
+    let path = installed.display().to_string();
+    state.mirror_keys.insert(path.clone());
+    src.mirrors.insert(target.to_string(), Mirror {
+        target: target.to_string(),
+        path: path.clone(),
+        source_hash,
+        installed_hash: file_hash(&installed).unwrap_or_default(),
+        diverged: false,
+    });
+    Ok(())
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let env = Env::from_env();
+    let _ = std::fs::create_dir_all(&env.state_dir);
+    let mut state = match State::load(&env.state_file()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("harness-sync: cannot read state {}: {e}", env.state_file().display());
+            std::process::exit(1);
+        }
+    };
+    if args.iter().any(|a| a == "--status") {
+        print!("{}", format_status(&state));
+        return;
+    }
+    if args.iter().any(|a| a == "--once") {
+        let changed = scan(&env, &mut state);
+        let attempted = changed.len();
+        for s in &changed {
+            if let Err(e) = sync_one(&env, &mut state, s) {
+                if let Some(src) = state.sources.get_mut(&s.key) {
+                    src.failures += 1;
+                }
+                eprintln!("prepare {} failed: {e}", s.key);
+            }
+        }
+        if let Err(e) = state.save(&env.state_file()) {
+            eprintln!("harness-sync: cannot save state: {e}");
+            std::process::exit(1);
+        }
+        println!("one pass done, {attempted} source(s) synced");
+        return;
+    }
+    eprintln!("usage: harness-sync --status | --once");
+    std::process::exit(2);
+}

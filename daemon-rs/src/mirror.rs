@@ -33,3 +33,19 @@ pub fn mirror_opencode_id(source_key: &str) -> String {
 pub fn file_hash_bytes(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// Lowercase sha256 hex of a file, read in 1 MiB chunks (the Python file_hash).
+pub fn file_hash(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
