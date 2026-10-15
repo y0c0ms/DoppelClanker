@@ -17,7 +17,17 @@
 # per-hook bash.)
 
 EVENT="$1"
-HS="$HOME/bin/hslock.exe"
+# Find the lock binary: an explicit HSLOCK, then PATH (hslock or hslock.exe), then the
+# per-user default. The installer puts hslock on PATH, so no path is hardcoded here.
+if [ -n "${HSLOCK:-}" ]; then
+  HS="$HSLOCK"
+elif command -v hslock >/dev/null 2>&1; then
+  HS="$(command -v hslock)"
+elif command -v hslock.exe >/dev/null 2>&1; then
+  HS="$(command -v hslock.exe)"
+else
+  HS="$HOME/bin/hslock"
+fi
 IN=$(cat)
 SID=${CLAUDE_CODE_SESSION_ID:-$(printf '%s' "$IN" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)}
 PID=${CLAUDE_PID:-$PPID}
@@ -25,7 +35,7 @@ PID=${CLAUDE_PID:-$PPID}
 
 if [ ! -x "$HS" ]; then
   if [ "$EVENT" = "submit" ]; then
-    printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"harness-sync: lock binary missing at ~/bin/hslock.exe; this turn is unprotected (cd ~/.local/share/harness-sync/lock && cargo build --release && cp target/release/hslock.exe ~/bin/)"}}\n'
+    printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"harness-sync: lock binary missing (hslock is not on PATH); this turn is unprotected (cd ~/.local/share/harness-sync/lock && cargo build --release && cp target/release/hslock.exe ~/bin/)"}}\n'
   fi
   exit 0
 fi
