@@ -10,7 +10,7 @@ Three parts cooperate:
 
 1. **A canonical journal.** omp and Pi session files are the source of truth. Every other harness gets a converted copy, called a *mirror*. Mirrors are derived data: deleting one and letting the daemon rebuild it is safe.
 2. **A converter (`hsconv`, Rust).** Converts between the omp/Pi journal format and the OpenCode and Claude Code formats. Images are inlined when moved to Pi. Reasoning content is kept for omp, Pi and OpenCode, and dropped for Claude Code, which signs its reasoning blocks and cannot accept ours.
-3. **A lock (`hslock`, Rust) and a sync daemon (Python).** A conversation is locked while a harness is taking a turn. The lock is claimed when the turn starts and released when it ends, so an idle conversation holds nothing. The daemon rebuilds mirrors when their sources change and skips any conversation that is currently locked.
+3. **A lock (`hslock`, Rust) and a sync daemon (`harness-sync`, Rust).** A conversation is locked while a harness is taking a turn. The lock is claimed when the turn starts and released when it ends, so an idle conversation holds nothing. The daemon rebuilds mirrors when their sources change and skips any conversation that is currently locked.
 
 The lock is enforced inside each harness:
 
@@ -28,13 +28,12 @@ A refused claim blocks the prompt and names the holder, so two harnesses never w
 lock/      hslock: claim / release / check / resolve / sweep / list
 hsconv/    hsconv: inspect / ids / to-pi / to-omp / to-opencode / to-claude
 hooks/     per-harness lock hooks (omp+Pi extension, Claude Code shell hook)
-daemon/    harness_sync.py: the sync daemon
+daemon-rs/ harness-sync: the sync daemon and manage TUI (Rust)
 ```
 
 ## Requirements
 
 - Rust (stable) to build `hslock` and `hsconv`.
-- Python 3.11+ for the daemon (developed and tested on 3.13).
 - The harnesses you want to sync: omp, Pi, OpenCode, Claude Code.
 
 ## Build
@@ -57,14 +56,14 @@ The daemon reads these environment variables. All are optional.
 | `PI_AGENT_DIR` | `~/.pi/agent` | Pi data |
 | `OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | OpenCode database |
 | `HSCONV` | `~/bin/hsconv.exe` | Path to the converter |
-| `SMIGRATE` | `Scripts/smigrate.exe` beside the Python interpreter | Path to session-migrate, used for Claude Code sources |
 
 ## Usage
 
 ```sh
-python daemon/harness_sync.py --once      # run one sync pass and exit
-python daemon/harness_sync.py -v          # run continuously, verbose
-python daemon/harness_sync.py --status    # show current state
+harness-sync --once      # run one sync pass and exit
+harness-sync --watch     # run continuously (HARNESS_SYNC_POLL seconds apart)
+harness-sync --status    # show current state
+harness-sync --tui       # manage sessions: list, rename, delete
 ```
 
 Inspect the lock and converter directly:
@@ -78,9 +77,9 @@ hsconv ids <file.jsonl>        # list session ids in a journal
 
 ## Caveats
 
-- **Windows-tested.** Developed and run on Windows. Paths use Windows conventions, and the daemon starts subprocesses with no console window.
-- **Claude Code sources** are read through [session-migrate](https://github.com/xhluca/session-migrate) (`smigrate`). `hsconv` handles only omp and Pi sources; the daemon routes Claude-as-source through `smigrate`.
-- **A crashed harness can leave a lock.** Locks record the harness pid and are swept on daemon start. Run `hslock sweep` to clear stale locks manually.
+- **Platform status.** Developed on Windows and tested on Linux. The Rust daemon has not been run on Windows or macOS yet (see the packaging issues).
+- **Claude Code sources** are converted by `hsconv` (`from-claude` and `to-claude`). The Python session-migrate dependency is no longer used.
+- **A crashed harness can leave a lock.** Locks record the harness pid and are swept when the daemon starts. Run `hslock sweep` to clear stale locks manually.
 - **Lock failure policy.** If `hslock` is missing, the hooks fail open with a notice. The daemon's divergence guard is the backstop.
 
 ## Acknowledgements
