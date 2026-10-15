@@ -313,6 +313,55 @@ fn list() -> i32 {
     0
 }
 
+/// Value of a flag like `--pid 123` in the argument list.
+fn flag<'a>(a: &'a [String], name: &str) -> Option<&'a str> {
+    a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).map(String::as_str)
+}
+
+/// Read a top-level string or bool field from a JSON object without a parser.
+/// Only used for the few fields the hook needs (`role`, `willContinue`).
+fn json_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let at = body.find(&needle)? + needle.len();
+    let rest = body[at..].trim_start().strip_prefix(':')?.trim_start();
+    if let Some(r) = rest.strip_prefix('"') {
+        r.find('"').map(|e| &r[..e])
+    } else {
+        let e = rest.find(|c: char| c == ',' || c == '}' ).unwrap_or(rest.len());
+        Some(rest[..e].trim())
+    }
+}
+
+/// The harness hook, ported from hooks/harness-sync-lock.ts.
+///
+/// `hslock hook <event> <harness> --pid <pid> [--session <id>]`, JSON payload on
+/// stdin. Exit 2 means the claim was refused; the holder is printed on stdout as
+/// "<harness> <pid>" so the harness can show who holds the conversation.
+/// With no session id the conversation is unprotected by decision (#15): nothing
+/// is taken and the exit is 0.
+fn hook(event: &str, harness: &str, a: &[String]) -> i32 {
+    let pid: u32 = match flag(a, "--pid").and_then(|p| p.parse().ok()) {
+        Some(p) => p,
+        None => { eprintln!("hslock hook: --pid is required"); return 1; }
+    };
+    let Some(session) = flag(a, "--session").filter(|s| !s.is_empty()) else {
+        return 0; // unprotected by decision: no session file, nothing to lock
+    };
+    let mut body = String::new();
+    let _ = io::Read::read_to_string(&mut io::stdin(), &mut body);
+    match event {
+        "turn_start" => claim(session, harness, pid, "", false),
+        "turn_end" | "session_stop" | "session_switch" | "session_shutdown" => release(session, harness, pid),
+        "agent_end" => {
+            if json_field(&body, "willContinue") == Some("true") { 0 } else { release(session, harness, pid) }
+        }
+        "message_end" => {
+            if json_field(&body, "role") == Some("assistant") { release(session, harness, pid) } else { 0 }
+        }
+        _ => { eprintln!("hslock hook: unknown event {event}"); 1 }
+    }
+}
+
 fn usage() -> ! {
     eprintln!(
         "hslock claim <id> <harness> <pid> [target] [--force]\n\
@@ -338,6 +387,7 @@ fn main() {
         Some("resolve") if a.len() >= 2 => { println!("{}", resolve(&a[1])); 0 }
         Some("sweep") => sweep(),
         Some("list") => list(),
+        Some("hook") if a.len() >= 3 => hook(&a[1], &a[2], &a[3..]),
         _ => usage(),
     };
     process::exit(code);
