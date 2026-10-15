@@ -167,7 +167,11 @@ fn set_winsize(fd: i32, rows: u16, cols: u16) {
     #[repr(C)]
     struct Winsize { row: u16, col: u16, xpixel: u16, ypixel: u16 }
     extern "C" { fn ioctl(fd: i32, req: u64, ...) -> i32; }
+    // The request number differs by platform: Linux 0x5414, macOS/BSD 0x80087467.
+    #[cfg(target_os = "linux")]
     const TIOCSWINSZ: u64 = 0x5414;
+    #[cfg(not(target_os = "linux"))]
+    const TIOCSWINSZ: u64 = 0x8008_7467;
     let ws = Winsize { row: rows, col: cols, xpixel: 0, ypixel: 0 };
     let r = unsafe { ioctl(fd, TIOCSWINSZ, &ws as *const Winsize) };
     assert_eq!(r, 0, "TIOCSWINSZ failed");
