@@ -5,6 +5,7 @@
 #   sh install.sh --prefix DIR        install under DIR
 #   sh install.sh --uninstall         remove exactly what install added
 #   sh install.sh --no-service        do not register the daemon to start at login
+#   sh install.sh --no-build          use already-built release binaries (CI)
 #
 # Installed:
 #   <prefix>/bin/hslock         lock: claim, release, check, sweep, hook
@@ -20,13 +21,15 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 PREFIX="${HOME}/.local"
 UNINSTALL=0
 SERVICE=1
+NOBUILD=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     --no-service) SERVICE=0; shift ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    --no-build) NOBUILD=1; shift ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -50,12 +53,15 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
-command -v cargo >/dev/null 2>&1 || { echo "cargo is required (install Rust stable)" >&2; exit 1; }
-
-echo "== building"
-(cd "$ROOT/lock" && cargo build --release --quiet)
-(cd "$ROOT/hsconv" && cargo build --release --quiet)
-(cd "$ROOT/daemon-rs" && cargo build --release --quiet)
+if [ "$NOBUILD" = 0 ]; then
+  command -v cargo >/dev/null 2>&1 || { echo "cargo is required (install Rust stable)" >&2; exit 1; }
+  echo "== building"
+  (cd "$ROOT/lock" && cargo build --release --quiet)
+  (cd "$ROOT/hsconv" && cargo build --release --quiet)
+  (cd "$ROOT/daemon-rs" && cargo build --release --quiet)
+else
+  echo "== using existing release binaries (--no-build)"
+fi
 
 mkdir -p "$BIN" "$SHARE/hooks"
 : > "$MANIFEST.tmp"
