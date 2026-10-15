@@ -213,3 +213,24 @@ fn map(v: Value) -> Map<String, Value> {
         _ => Map::new(),
     }
 }
+
+#[cfg(test)]
+mod untimed_tests {
+    use super::*;
+    use crate::journal::Journal;
+
+    #[test]
+    fn untimed_journal_never_produces_the_epoch() {
+        let path = std::env::temp_dir().join(format!("hs-untimed-{}.jsonl", std::process::id()));
+        std::fs::write(&path, concat!(
+            r#"{"type":"session","version":3,"id":"s","cwd":"/t","title":"x"}"#, "\n",
+            r#"{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":"p"}}"#, "\n",
+            r#"{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[{"type":"text","text":"a"}]}}"#, "\n",
+        )).unwrap();
+        let j = Journal::read(&path).unwrap();
+        let v = to_bundle(&j, &Options { session_id: "ses_untimedtest000000000000", title: "x", directory: "/t", cli_version: "1", include_thinking: false });
+        let _ = std::fs::remove_file(&path);
+        let created = v["info"]["time"]["created"].as_i64().unwrap();
+        assert!(created > 1_700_000_000_000, "epoch leaked into the O-penCode session time: {created}");
+    }
+}

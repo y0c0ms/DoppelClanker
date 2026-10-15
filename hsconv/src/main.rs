@@ -11,6 +11,8 @@
 //! produces the same mirror and the daemon can replace in place.
 
 mod claude;
+mod from_claude;
+mod from_opencode;
 mod journal;
 mod opencode;
 
@@ -20,6 +22,31 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
+
+/// ISO-8601 UTC timestamp of a file's modification time, millisecond precision.
+/// Falls back to the current time if the mtime cannot be read, never the epoch.
+fn file_mtime_iso(path: &Path) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default());
+    let ms = secs.as_millis() as i64;
+    let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
+    // civil-from-days (Howard Hinnant), proleptic Gregorian, UTC
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    let (h, mi, s, milli) = (rem / 3_600_000, rem / 60_000 % 60, rem / 1000 % 60, rem % 1000);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{milli:03}Z")
+}
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
@@ -34,6 +61,8 @@ fn usage() -> ! {
          hsconv to-pi <journal> --out-dir <pi-agent/sessions> [--id UUID] [--title T]\n\
          hsconv to-omp <journal> --out-dir <omp-agent/sessions> --home <HOME> [--id UUID] [--title T]\n\
          hsconv to-opencode <journal> [--out bundle.json] --id SES_ID --title T [--cli-version V] [--no-thinking]\n\
+         hsconv from-claude <transcript.jsonl> --out <journal.jsonl>\n\
+         hsconv from-opencode <export.json> --out <journal.jsonl>\n\
          hsconv to-claude <journal> --out-dir <~/.claude/projects> [--id UUID] [--cli-version V]\n\
          hsconv ids <seed>            (prints the deterministic opencode and claude ids)\n\
          Output path is printed on stdout for to-pi/to-omp/to-claude."
@@ -100,6 +129,39 @@ fn main() {
                     j.flavor(), j.session_id().unwrap_or("-"), j.cwd().unwrap_or("-"), j.title_text(), j.records.len(), msgs.len(), roles, blocks);
             })
         }
+        "from-claude" => {
+            let p = PathBuf::from(args.get(1).unwrap_or_else(|| usage()));
+            let out = arg(&args, "--out").unwrap_or_else(|| usage());
+            fs::read_to_string(&p)
+                .map_err(|e| format!("{}: {e}", p.display()))
+                .and_then(|raw| from_claude::to_journal_lines(&raw))
+                .and_then(|(lines, stats)| {
+                    let mut text = lines.join("\n");
+                    text.push('\n');
+                    fs::write(&out, text).map_err(|e| format!("{out}: {e}"))?;
+                    eprintln!("from-claude: {} message(s), {} text block(s), skipped {} tool / {} thinking / {} records",
+                        stats.messages, stats.text_blocks, stats.skipped_tool_blocks, stats.skipped_thinking_blocks, stats.skipped_records);
+                    println!("{out}");
+                    Ok(())
+                })
+        }
+        "from-opencode" => {
+            let p = PathBuf::from(args.get(1).unwrap_or_else(|| usage()));
+            let out = arg(&args, "--out").unwrap_or_else(|| usage());
+            fs::read_to_string(&p)
+                .map_err(|e| format!("{}: {e}", p.display()))
+                .and_then(|raw| from_opencode::parse_export(&raw))
+                .and_then(|v| from_opencode::to_journal_lines(&v))
+                .and_then(|(lines, stats)| {
+                    let mut text = lines.join("\n");
+                    text.push('\n');
+                    fs::write(&out, text).map_err(|e| format!("{out}: {e}"))?;
+                    eprintln!("from-opencode: {} message(s), {} text part(s), skipped {} tool / {} reasoning",
+                        stats.messages, stats.text_parts, stats.skipped_tool_parts, stats.skipped_reasoning_parts);
+                    println!("{out}");
+                    Ok(())
+                })
+        }
         "ids" => {
             let seed = args.get(1).unwrap_or_else(|| usage());
             println!("opencode {}\nclaude {}", opencode::session_id_for(seed), claude::session_id_for(seed));
@@ -112,7 +174,12 @@ fn main() {
                 let src_id = j.session_id().unwrap_or("").to_string();
                 let new_id = arg(&args, "--id").unwrap_or_else(|| src_id.clone());
                 let cwd = j.cwd().unwrap_or("").to_string();
-                let ts = j.timestamp().unwrap_or("1970-01-01T00:00:00.000Z").to_string();
+                // No header timestamp: use the source file's mtime, never the epoch
+                // (the epoch put 1970 into mirror filenames).
+                let ts = match j.timestamp() {
+                    Some(t) => t.to_string(),
+                    None => file_mtime_iso(&p),
+                };
                 rewrite_ids(&mut j, &new_id);
                 let title = arg(&args, "--title").unwrap_or_else(|| j.title_text());
                 let (bucket, head): (String, Option<String>) = if cmd == "to-pi" {
