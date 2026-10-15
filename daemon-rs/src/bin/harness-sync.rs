@@ -82,8 +82,8 @@ fn scan(env: &Env, state: &mut State) -> Vec<PassSource> {
         if !dir.is_dir() {
             continue;
         }
-        let other = if fmt == "omp" { "pi" } else { "omp" };
-        let other_present = if other == "omp" { env.omp.is_dir() } else { env.pi.is_dir() };
+        let installed = installed_targets(env);
+        let wanted_targets = installed.iter().filter(|t| t.as_str() != fmt).count();
         for path in discovery::jsonl_sessions(dir) {
             let key = path.display().to_string();
             if is_mirror(state, &key) {
@@ -106,7 +106,7 @@ fn scan(env: &Env, state: &mut State) -> Vec<PassSource> {
             let hash_changed = hash != src.last_hash;
             let live: Vec<&Mirror> = src.mirrors.values().filter(|m| !m.diverged).collect();
             let live_current = live.iter().all(|m| m.source_hash == hash);
-            let wanted = if other_present { 1 } else { 0 };
+            let wanted = wanted_targets;
             let input = ScanInput {
                 size: meta.len(),
                 mtime,
@@ -210,45 +210,112 @@ fn sync_opencode(env: &Env, state: &mut State, s: &PassSource) -> Result<(), Str
 /// Mirror one changed source into the other store. Claims the conversation while
 /// it writes, so a harness turn cannot start mid-mirror.
 fn sync_one(env: &Env, state: &mut State, s: &PassSource) -> Result<(), String> {
-    if state.sources.get(&s.key).map(|src| src.fmt.as_str()) == Some("opencode") {
+    let fmt = state.sources.get(&s.key).map(|src| src.fmt.clone()).ok_or("unknown source")?;
+    if fmt == "opencode" {
         return sync_opencode(env, state, s);
     }
-    let (fmt, id) = {
-        let src = state.sources.get(&s.key).ok_or("unknown source")?;
-        (src.fmt.clone(), discovery::parse_omp_name(Path::new(&s.key).file_name().and_then(|n| n.to_str()).unwrap_or("")).unwrap_or_default())
+    // Fan out: one mirror per installed target other than the source's own format.
+    let mut last_err: Option<String> = None;
+    for target in installed_targets(env) {
+        if target == fmt {
+            continue;
+        }
+        if let Err(e) = mirror_file_source(env, state, s, &fmt, &target) {
+            last_err = Some(e);
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Which harness stores exist on this machine, as format names.
+fn installed_targets(env: &Env) -> Vec<String> {
+    let mut t = Vec::new();
+    if env.omp.is_dir() { t.push("omp".to_string()); }
+    if env.pi.is_dir() { t.push("pi".to_string()); }
+    if env.opencode_db.exists() { t.push("opencode".to_string()); }
+    if env.claude.join("projects").is_dir() { t.push("claude".to_string()); }
+    t
+}
+
+/// Mirror one file-based source into one target store.
+fn mirror_file_source(env: &Env, state: &mut State, s: &PassSource, fmt: &str, target: &str) -> Result<(), String> {
+    if target == "opencode" {
+        // O-penCode is installed by bundle import, not by writing a file.
+        return install_into_opencode(env, state, s);
+    }
+    let id = discovery::parse_omp_name(Path::new(&s.key).file_name().and_then(|n| n.to_str()).unwrap_or("")).unwrap_or_default();
+    let target_store = match target {
+        "pi" => env.pi.clone(),
+        "omp" => env.omp.clone(),
+        "claude" => env.claude.clone(),
+        other => return Err(format!("unknown target {other}")),
     };
-    let target = if fmt == "omp" { "pi" } else { "omp" };
-    let target_store = if target == "pi" { env.pi.clone() } else { env.omp.clone() };
     let mirror_id = mirror_uuid(&s.key, target);
     let conv = if id.is_empty() { s.key.clone() } else { id };
     let src_path = PathBuf::from(&s.key);
-    let cwd = "/".to_string();
-
     let outcome = with_claim(&env.hslock, None, &conv, "daemon", std::process::id(), &s.key, || {
-        let t = if target == "pi" {
-            InstallTarget::Pi { agent_dir: target_store.clone() }
-        } else {
-            InstallTarget::Omp { agent_dir: target_store.clone(), home: target_store.parent().unwrap_or(&target_store).to_path_buf() }
+        let t = match target {
+            "pi" => InstallTarget::Pi { agent_dir: target_store.clone() },
+            "omp" => InstallTarget::Omp { agent_dir: target_store.clone(), home: target_store.parent().unwrap_or(&target_store).to_path_buf() },
+            _ => InstallTarget::Claude { claude_dir: target_store.clone() },
         };
-        install_journal(&env.hsconv, &src_path, t, &cwd, &mirror_id, &s.title)
+        install_journal(&env.hsconv, &src_path, t, "/", &mirror_id, &s.title)
     });
     let installed = match outcome {
         ClaimOutcome::Skipped(holder) => return Err(format!("held by {holder}; will retry")),
         ClaimOutcome::Ran(r) => r?,
     };
-    let src = state.sources.get_mut(&s.key).ok_or("unknown source")?;
-    let source_hash = src.last_hash.clone();
+    record_mirror(state, &s.key, target, &installed)?;
+    let _ = fmt;
+    Ok(())
+}
+
+/// Record a written mirror in state so it is never treated as a source.
+fn record_mirror(state: &mut State, key: &str, target: &str, installed: &Path) -> Result<(), String> {
+    let src = state.sources.get_mut(key).ok_or("unknown source")?;
     let path = installed.display().to_string();
     state.mirror_keys.insert(path.clone());
     src.mirrors.insert(target.to_string(), Mirror {
         target: target.to_string(),
-        path: path.clone(),
-        source_hash,
-        installed_hash: file_hash(&installed).unwrap_or_default(),
+        path,
+        source_hash: src.last_hash.clone(),
+        installed_hash: file_hash(installed).unwrap_or_default(),
         diverged: false,
     });
     Ok(())
 }
+
+/// Install a file source into O-penCode through its bundle import.
+fn install_into_opencode(env: &Env, state: &mut State, s: &PassSource) -> Result<(), String> {
+    // O-penCode ids must be "ses_..." (the Python uses mirror_opencode_id for this target).
+    let mirror_id = harness_sync::mirror::mirror_opencode_id(&s.key);
+    let conv = s.key.clone();
+    let src_path = PathBuf::from(&s.key);
+    let outcome = with_claim(&env.hslock, None, &conv, "daemon", std::process::id(), &s.key, || {
+        harness_sync::install::install_opencode(
+            &env.opencode_bin, &env.hsconv, &src_path, "/", &mirror_id, &s.title, &env.state_dir.join("oc-home"),
+        )
+    });
+    let id = match outcome {
+        ClaimOutcome::Skipped(holder) => return Err(format!("held by {holder}; will retry")),
+        ClaimOutcome::Ran(r) => r?,
+    };
+    let src = state.sources.get_mut(&s.key).ok_or("unknown source")?;
+    state.mirror_keys.insert(id.clone());
+    src.mirrors.insert("opencode".to_string(), Mirror {
+        target: "opencode".to_string(),
+        path: id,
+        source_hash: src.last_hash.clone(),
+        installed_hash: String::new(),
+        diverged: false,
+    });
+    Ok(())
+}
+
+
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

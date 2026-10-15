@@ -29,6 +29,9 @@ fn run(sb: &Path, extra: &[&str], converter: &Path) -> Output {
         .env("PI_AGENT_DIR", sb.join("pi"))
         .env("CLAUDE_CONFIG_DIR", sb.join("claude"))
         .env("HSCONV", converter)
+        // Point O-penCode at an empty sandbox path. Without this the binary reads the
+        // user's real opencode.db and mirrors their live sessions.
+        .env("OPENCODE_DB", sb.join("no-opencode").join("opencode.db"))
         .env("HSLOCK", sb.join("no-hslock"))
         .env("HARNESS_SYNC_QUIET", "0")
         .output()
