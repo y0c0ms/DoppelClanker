@@ -161,10 +161,18 @@ pub fn rename_group(roots: &Roots, g: &Group, title: &str, lock_dir: &Path, hslo
     let conv = conversation_id(&g.key);
     let outcome = with_claim(hslock, Some(lock_dir), &conv, "tui", std::process::id(), &g.key, || {
         let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let rewritten = rewrite_title(&text, &g.fmt, &new);
+        // Claude session files are named by their uuid; that is the session id.
+        let session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let rewritten = rewrite_title(&text, &g.fmt, &new, &session_id);
         let tmp = path.with_extension("rename.tmp");
-        fs::write(&tmp, rewritten).map_err(|e| e.to_string())?;
-        fs::rename(&tmp, &path).map_err(|e| e.to_string())
+        fs::write(&tmp, &rewritten).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+        // A rename that leaves the new name out of the file must not report success.
+        let check = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        if !check.contains(&new) {
+            return Err(format!("rename did not write the new title into {}", path.display()));
+        }
+        Ok(())
     });
     match outcome {
         ClaimOutcome::Skipped(h) => Err(format!("conversation is in use by {h}")),
@@ -172,8 +180,30 @@ pub fn rename_group(roots: &Roots, g: &Group, title: &str, lock_dir: &Path, hslo
     }
 }
 
-/// Replace the title in the native record for `fmt`. Other records are untouched.
-fn rewrite_title(text: &str, fmt: &str, title: &str) -> String {
+/// The file content after a rename, for the format's native rule:
+///   omp:    the session header's title is replaced (omp reads it first);
+///   claude: a custom-title record is appended (what /rename and -n write);
+///   pi:     a session_info record with the name is appended, history kept.
+/// The transcript is never rewritten for claude or pi.
+fn rewrite_title(text: &str, fmt: &str, title: &str, session_id: &str) -> String {
+    if fmt == "claude" {
+        let mut out = text.to_string();
+        if !out.ends_with('\n') && !out.is_empty() { out.push('\n'); }
+        out.push_str(&serde_json::json!({
+            "type": "custom-title", "customTitle": title, "sessionId": session_id,
+        }).to_string());
+        out.push('\n');
+        return out;
+    }
+    if fmt == "pi" {
+        let mut out = text.to_string();
+        if !out.ends_with('\n') && !out.is_empty() { out.push('\n'); }
+        out.push_str(&serde_json::json!({
+            "type": "session_info", "name": title,
+        }).to_string());
+        out.push('\n');
+        return out;
+    }
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     if fmt == "omp" {
         // The header carries the title; a `title` record is the slot omp reads first.
