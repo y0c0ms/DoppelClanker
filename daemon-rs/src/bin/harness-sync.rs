@@ -361,6 +361,22 @@ fn one_pass(env: &Env, state: &mut State) -> usize {
     attempted
 }
 
+/// Take the daemon-wide instance lock in the state directory. Held for the life of the
+/// returned file; the OS drops it when the process exits.
+fn acquire_instance(env: &Env) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(&env.state_dir).map_err(|e| e.to_string())?;
+    let path = env.state_dir.join("daemon.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true).read(true).write(true).truncate(false)
+        .open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) =>
+            Err("already running: another harness-sync --watch holds this state directory".into()),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("cannot lock {}: {e}", path.display())),
+    }
+}
+
 /// Clear locks whose process is gone, using hslock's own sweep. Missing binary is a no-op.
 fn sweep_stale_locks(env: &Env) {
     if env.hslock.exists() {
@@ -401,6 +417,15 @@ fn main() {
         return;
     }
     if args.iter().any(|a| a == "--watch") {
+        // One daemon per state directory. The OS releases this lock when the process
+        // exits, even on a crash, so a stale file never blocks a new start.
+        let _instance = match acquire_instance(&env) {
+            Ok(f) => f,
+            Err(msg) => {
+                eprintln!("harness-sync: {msg}");
+                std::process::exit(3);
+            }
+        };
         // Clear locks left by dead processes before the first pass, as the Python does.
         sweep_stale_locks(&env);
         let limit: Option<u64> = std::env::var("HARNESS_SYNC_PASSES").ok().and_then(|v| v.parse().ok());
