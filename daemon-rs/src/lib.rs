@@ -2,6 +2,7 @@
 pub mod app;
 pub mod claude_source;
 pub mod discovery;
+pub mod divergence;
 pub mod install;
 pub mod lock;
 pub mod manage;

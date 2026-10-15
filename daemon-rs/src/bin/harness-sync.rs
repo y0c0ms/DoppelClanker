@@ -246,6 +246,9 @@ fn mirror_file_source(env: &Env, state: &mut State, s: &PassSource, fmt: &str, t
         // O-penCode is installed by bundle import, not by writing a file.
         return install_into_opencode(env, state, s);
     }
+    if !mirror_may_refresh(state, &s.key, target) {
+        return Ok(());
+    }
     let id = discovery::parse_omp_name(Path::new(&s.key).file_name().and_then(|n| n.to_str()).unwrap_or("")).unwrap_or_default();
     let target_store = match target {
         "pi" => env.pi.clone(),
@@ -282,10 +285,32 @@ fn record_mirror(state: &mut State, key: &str, target: &str, installed: &Path) -
         target: target.to_string(),
         path,
         source_hash: src.last_hash.clone(),
-        installed_hash: file_hash(installed).unwrap_or_default(),
+        // The divergence fingerprint (size and mtime), not the content hash: a harness
+        // that writes to the mirror changes this, and the mirror is then frozen.
+        installed_hash: harness_sync::divergence::fingerprint(installed),
         diverged: false,
     });
     Ok(())
+}
+
+/// Before refreshing a mirror, check it. A mirror a harness has written to, or one
+/// with no fingerprint, is frozen (marked diverged) and must not be overwritten.
+/// Returns true when the mirror may be refreshed.
+fn mirror_may_refresh(state: &mut State, key: &str, target: &str) -> bool {
+    let Some(src) = state.sources.get_mut(key) else { return true };
+    let Some(m) = src.mirrors.get_mut(target) else { return true };
+    if m.diverged {
+        return false;
+    }
+    match harness_sync::divergence::check_mirror(Path::new(&m.path), &m.installed_hash) {
+        harness_sync::divergence::MirrorCheck::Current => true,
+        harness_sync::divergence::MirrorCheck::Missing => true,
+        harness_sync::divergence::MirrorCheck::Diverged => {
+            m.diverged = true;
+            eprintln!("mirror {} of {key} was continued in {target}; frozen, no longer refreshed", m.path);
+            false
+        }
+    }
 }
 
 /// Install a file source into O-penCode through its bundle import.
