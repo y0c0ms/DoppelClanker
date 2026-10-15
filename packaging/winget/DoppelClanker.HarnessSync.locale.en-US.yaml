@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+PackageIdentifier: DoppelClanker.HarnessSync
+PackageVersion: <VERSION>
+PackageLocale: en-US
+Publisher: y0c0ms
+PublisherUrl: https://github.com/y0c0ms
+PackageName: harness-sync
+PackageUrl: https://github.com/y0c0ms/DoppelClanker
+License: MIT
+ShortDescription: Keep coding-agent sessions in step across harnesses (omp, Pi, OpenCode, Claude Code).
+Tags:
+  - ai
+  - coding-agent
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+PackageIdentifier: DoppelClanker.HarnessSync
+PackageVersion: <VERSION>
+InstallerLocale: en-US
+MinimumOSVersion: 10.0.17763.0
+Platform:
+  - Windows.Desktop
+InstallModes:
+  - silent
+  - silentWithProgress
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: <URL>
+    InstallerSha256: <SHA256>
+    Scope: user
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: bin\harness-sync.exe
+        PortableCommandAlias: harness-sync
+      - RelativeFilePath: bin\hsconv.exe
+        PortableCommandAlias: hsconv
+      - RelativeFilePath: bin\hslock.exe
+        PortableCommandAlias: hslock
+ManifestType: installer
+ManifestVersion: 1.10.0
