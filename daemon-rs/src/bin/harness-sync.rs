@@ -342,6 +342,32 @@ fn install_into_opencode(env: &Env, state: &mut State, s: &PassSource) -> Result
 
 
 
+/// One sync pass: scan, mirror each changed source, record failures, save state.
+/// A failing source is counted and the rest still sync. Returns sources attempted.
+fn one_pass(env: &Env, state: &mut State) -> usize {
+    let changed = scan(env, state);
+    let attempted = changed.len();
+    for s in &changed {
+        if let Err(e) = sync_one(env, state, s) {
+            if let Some(src) = state.sources.get_mut(&s.key) {
+                src.failures += 1;
+            }
+            eprintln!("prepare {} failed: {e}", s.key);
+        }
+    }
+    if let Err(e) = state.save(&env.state_file()) {
+        eprintln!("harness-sync: cannot save state: {e}");
+    }
+    attempted
+}
+
+/// Clear locks whose process is gone, using hslock's own sweep. Missing binary is a no-op.
+fn sweep_stale_locks(env: &Env) {
+    if env.hslock.exists() {
+        let _ = std::process::Command::new(&env.hslock).arg("sweep").output();
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let env = Env::from_env();
@@ -370,24 +396,27 @@ fn main() {
         return;
     }
     if args.iter().any(|a| a == "--once") {
-        let changed = scan(&env, &mut state);
-        let attempted = changed.len();
-        for s in &changed {
-            if let Err(e) = sync_one(&env, &mut state, s) {
-                if let Some(src) = state.sources.get_mut(&s.key) {
-                    src.failures += 1;
-                }
-                eprintln!("prepare {} failed: {e}", s.key);
-            }
-        }
-        if let Err(e) = state.save(&env.state_file()) {
-            eprintln!("harness-sync: cannot save state: {e}");
-            std::process::exit(1);
-        }
+        let attempted = one_pass(&env, &mut state);
         println!("one pass done, {attempted} source(s) synced");
         return;
     }
-    eprintln!("usage: harness-sync --status | --once");
+    if args.iter().any(|a| a == "--watch") {
+        // Clear locks left by dead processes before the first pass, as the Python does.
+        sweep_stale_locks(&env);
+        let limit: Option<u64> = std::env::var("HARNESS_SYNC_PASSES").ok().and_then(|v| v.parse().ok());
+        let poll = std::time::Duration::from_secs_f64(
+            std::env::var("HARNESS_SYNC_POLL").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0));
+        let mut passes = 0u64;
+        loop {
+            one_pass(&env, &mut state);
+            passes += 1;
+            if limit.map_or(false, |l| passes >= l) {
+                return;
+            }
+            std::thread::sleep(poll);
+        }
+    }
+    eprintln!("usage: harness-sync --status | --once | --watch | --tui");
     std::process::exit(2);
 }
 
