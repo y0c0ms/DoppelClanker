@@ -65,7 +65,9 @@ fn refused_claim_exits_2_and_names_the_holder() {
     // Another live harness holds it: this process stands in for a live holder.
     let first = hook(&d, &["turn_start", "claude", "--pid", &me, "--session", "conv1"], "{}");
     assert_eq!(code(&first), 0, "{first:?}");
-    let second = hook(&d, &["turn_start", "omp", "--pid", "1234", "--session", "conv1"], "{}");
+    // The second caller is a different harness. Its pid does not matter for a refusal,
+    // so use another live pid (this process) rather than a fixed pid that may be unused.
+    let second = hook(&d, &["turn_start", "omp", "--pid", &me, "--session", "conv1"], "{}");
     assert_eq!(code(&second), 2, "a refused claim must exit 2 so the harness blocks the turn");
     let out = String::from_utf8_lossy(&second.stdout);
     assert!(out.contains("claude"), "the refusal must name the holder, got: {out}");
