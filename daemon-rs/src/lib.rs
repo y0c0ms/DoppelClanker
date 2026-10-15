@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod install;
 pub mod lock;
 pub mod mirror;
+pub mod pass;
 pub mod scan;
 pub mod state;
 pub mod titles;
