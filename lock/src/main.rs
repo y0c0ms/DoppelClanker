@@ -332,7 +332,7 @@ fn json_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     }
 }
 
-/// The harness hook, ported from hooks/harness-sync-lock.ts.
+/// The harness hook. Replaces the Node extension that was removed.
 ///
 /// `hslock hook <event> <harness> --pid <pid> [--session <id>]`, JSON payload on
 /// stdin. Exit 2 means the claim was refused; the holder is printed on stdout as

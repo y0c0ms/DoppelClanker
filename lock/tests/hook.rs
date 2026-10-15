@@ -1,4 +1,4 @@
-//! Tests for `hslock hook <event> <harness>`: the port of hooks/harness-sync-lock.ts.
+//! Tests for `hslock hook <event> <harness>`, the lock hook used by the harnesses.
 //! The hook reads a JSON event on stdin and prints a decision on stdout.
 //! Each test uses a private lock directory, so the real state is never touched.
 
@@ -39,7 +39,9 @@ fn hook(dir: &Dir, args: &[&str], stdin: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("run hslock hook");
-    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    // A hook may exit before reading stdin (no session id returns early). A broken pipe
+    // on this write is expected then; the exit code and lock files are what the tests check.
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
     child.wait_with_output().unwrap()
 }
 
