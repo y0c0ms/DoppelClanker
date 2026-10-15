@@ -81,3 +81,48 @@ pub fn install_journal(
     let _ = fs::remove_dir_all(&scratch);
     Ok(dest)
 }
+
+/// Install an omp/Pi journal as an O-penCode session. Ported from install_opencode:
+/// `hsconv to-opencode` writes a bundle, then `opencode import` loads it. The import
+/// must print "Imported session" or it is not counted as installed. `env_home` is
+/// applied to the CLI's XDG_* variables so tests can point it at a sandbox.
+pub fn install_opencode(
+    opencode: &Path,
+    hsconv: &Path,
+    src: &Path,
+    cwd: &str,
+    mirror_id: &str,
+    title: &str,
+    env_home: &Path,
+) -> Result<String, String> {
+    let _ = cwd;
+    let scratch = std::env::temp_dir().join(format!("hs-oc-install-{}-{mirror_id}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+    let bundle = scratch.join("bundle.json");
+
+    let conv = Command::new(hsconv)
+        .arg("to-opencode").arg(src)
+        .arg("--out").arg(&bundle)
+        .args(["--id", mirror_id, "--title", title])
+        .output()
+        .map_err(|e| format!("cannot run hsconv: {e}"))?;
+    if !conv.status.success() {
+        let _ = fs::remove_dir_all(&scratch);
+        return Err(format!("hsconv to-opencode failed: {}", String::from_utf8_lossy(&conv.stderr).trim()));
+    }
+
+    let mut cmd = Command::new(opencode);
+    cmd.arg("import").arg(&bundle)
+        .env("XDG_DATA_HOME", env_home.join("data"))
+        .env("XDG_CONFIG_HOME", env_home.join("cfg"))
+        .env("XDG_STATE_HOME", env_home.join("state"))
+        .env("XDG_CACHE_HOME", env_home.join("cache"));
+    let imp = cmd.output().map_err(|e| format!("cannot run opencode import: {e}"))?;
+    let _ = fs::remove_dir_all(&scratch);
+    let stdout = String::from_utf8_lossy(&imp.stdout);
+    if !imp.status.success() || !stdout.contains("Imported session") {
+        return Err(format!("opencode import failed: {}", String::from_utf8_lossy(&imp.stderr).trim()));
+    }
+    Ok(mirror_id.to_string())
+}
