@@ -77,12 +77,14 @@ for h in "$ROOT"/hooks/*; do
 done
 
 if [ "$SERVICE" = 1 ]; then
-  # Start the daemon at login. Linux uses a systemd user unit; other systems print the
-  # command to run. Windows uses the .vbs launcher in daemon-rs/, which is not wired here.
-  if [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1 && [ "$PREFIX" = "${HOME}/.local" ]; then
-    UNIT="${HOME}/.config/systemd/user/harness-sync.service"
-    mkdir -p "$(dirname "$UNIT")"
-    cat > "$UNIT" <<EOF2
+  # Start the daemon at login, per OS. Each service is recorded in the manifest so
+  # --uninstall removes it. Windows is handled by install.ps1 (per-user, no admin).
+  case "$(uname -s)" in
+    Linux)
+      if command -v systemctl >/dev/null 2>&1 && [ "$PREFIX" = "${HOME}/.local" ]; then
+        UNIT="${HOME}/.config/systemd/user/harness-sync.service"
+        mkdir -p "$(dirname "$UNIT")"
+        cat > "$UNIT" <<EOF2
 [Unit]
 Description=harness-sync: keep coding-agent sessions in step across harnesses
 
@@ -93,16 +95,50 @@ Restart=on-failure
 [Install]
 WantedBy=default.target
 EOF2
-    echo "$UNIT" >> "$MANIFEST.tmp"
-    systemctl --user daemon-reload 2>/dev/null || true
-    systemctl --user enable --now harness-sync.service 2>/dev/null || echo "note: run 'systemctl --user enable --now harness-sync' to start at login"
-    echo "harness-sync.service" > "$SHARE/service-id"
-    printf '#!/bin/sh\nsystemctl --user disable --now harness-sync.service 2>/dev/null || true\n' > "$SHARE/service-stop"
-    echo "$SHARE/service-stop" >> "$MANIFEST.tmp"
-    echo "$SHARE/service-id" >> "$MANIFEST.tmp"
-  else
-    echo "note: no login service registered on this system. Run '$BIN/harness-sync --watch' to sync."
-  fi
+        echo "$UNIT" >> "$MANIFEST.tmp"
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user enable --now harness-sync.service 2>/dev/null || echo "note: run 'systemctl --user enable --now harness-sync' to start at login"
+        printf '#!/bin/sh\nsystemctl --user disable --now harness-sync.service 2>/dev/null || true\n' > "$SHARE/service-stop"
+        echo "$SHARE/service-stop" >> "$MANIFEST.tmp"
+        echo "harness-sync.service" > "$SHARE/service-id"
+        echo "$SHARE/service-id" >> "$MANIFEST.tmp"
+      else
+        echo "note: no login service registered. Run '$BIN/harness-sync --watch' to sync."
+      fi
+      ;;
+    Darwin)
+      PLIST="${HOME}/Library/LaunchAgents/com.harnesssync.watch.plist"
+      mkdir -p "$(dirname "$PLIST")"
+      cat > "$PLIST" <<EOF3
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.harnesssync.watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$BIN/harness-sync</string>
+    <string>--watch</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${HOME}/Library/Logs/harness-sync.log</string>
+  <key>StandardErrorPath</key><string>${HOME}/Library/Logs/harness-sync.log</string>
+</dict>
+</plist>
+EOF3
+      echo "$PLIST" >> "$MANIFEST.tmp"
+      launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+      launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || echo "note: run 'launchctl bootstrap gui/$(id -u) $PLIST' to start at login"
+      printf '#!/bin/sh\nlaunchctl bootout "gui/$(id -u)" "%s" 2>/dev/null || true\n' "$PLIST" > "$SHARE/service-stop"
+      echo "$SHARE/service-stop" >> "$MANIFEST.tmp"
+      echo "com.harnesssync.watch" > "$SHARE/service-id"
+      echo "$SHARE/service-id" >> "$MANIFEST.tmp"
+      ;;
+    *)
+      echo "note: no login service for this system. Run '$BIN/harness-sync --watch' to sync."
+      ;;
+  esac
 fi
 
 echo "$MANIFEST" >> "$MANIFEST.tmp"
