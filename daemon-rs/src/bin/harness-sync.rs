@@ -16,6 +16,7 @@ struct Env {
     state_dir: PathBuf,
     omp: PathBuf,
     pi: PathBuf,
+    claude: PathBuf,
     hsconv: PathBuf,
     hslock: PathBuf,
     quiet_secs: f64,
@@ -31,6 +32,7 @@ impl Env {
             state_dir: get("HARNESS_SYNC_DIR", home.join(".local/share/harness-sync")),
             omp: get("OMP_AGENT_DIR", home.join(".omp/agent")),
             pi: get("PI_AGENT_DIR", home.join(".pi/agent")),
+            claude: get("CLAUDE_CONFIG_DIR", home.join(".claude")),
             hsconv: get("HSCONV", home.join("bin/hsconv")),
             hslock: get("HSLOCK", home.join("bin/hslock")),
             quiet_secs: num("HARNESS_SYNC_QUIET", 20.0),
@@ -39,6 +41,11 @@ impl Env {
     }
     fn state_file(&self) -> PathBuf {
         self.state_dir.join("state.json")
+    }
+    fn lock_dir(&self) -> PathBuf {
+        std::env::var_os("HARNESS_SYNC_LOCK_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.state_dir.join("locks"))
     }
     fn store_for(&self, fmt: &str) -> &Path {
         if fmt == "omp" { &self.omp } else { &self.pi }
@@ -175,6 +182,18 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if args.iter().any(|a| a == "--tui") {
+        let roots = harness_sync::manage::Roots {
+            omp: env.omp.join("sessions"),
+            pi: env.pi.join("sessions"),
+            claude: env.claude.join("projects"),
+        };
+        if let Err(e) = run_tui(roots, state, env.lock_dir(), env.hslock.clone()) {
+            eprintln!("harness-sync: tui failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--status") {
         print!("{}", format_status(&state));
         return;
@@ -199,4 +218,52 @@ fn main() {
     }
     eprintln!("usage: harness-sync --status | --once");
     std::process::exit(2);
+}
+
+/// Interactive manage screen. Raw mode and the alternate screen are restored on
+/// every exit path, including a panic, so the terminal is never left unusable.
+fn run_tui(roots: harness_sync::manage::Roots, state: State, lock_dir: PathBuf, hslock: PathBuf) -> std::io::Result<()> {
+    use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+    use crossterm::ExecutableCommand;
+    use harness_sync::app::{App, Ev};
+    use ratatui::{backend::CrosstermBackend, Terminal};
+    use std::time::{Duration, Instant};
+
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+            let _ = std::io::stdout().execute(LeaveAlternateScreen);
+        }
+    }
+
+    enable_raw_mode()?;
+    let _restore = Restore;
+    std::io::stdout().execute(EnterAlternateScreen)?;
+    let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    let mut app = App::new(roots, state, lock_dir, hslock);
+
+    loop {
+        term.draw(|f| harness_sync::ui::draw(f, &app))?;
+        if !event::poll(Duration::from_millis(200))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else { continue };
+        if key.kind != crossterm::event::KeyEventKind::Press {
+            continue;
+        }
+        let ev = match (key.code, key.modifiers) {
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => Ev::CtrlD,
+            (KeyCode::Char(c), _) => Ev::Char(c),
+            (KeyCode::Backspace, _) => Ev::Backspace,
+            (KeyCode::Enter, _) => Ev::Enter,
+            (KeyCode::Esc, _) => Ev::Esc,
+            _ => continue,
+        };
+        app.handle(ev, Instant::now());
+        if app.should_quit() {
+            return Ok(());
+        }
+    }
 }
