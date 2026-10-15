@@ -35,11 +35,13 @@ pub struct Group {
     pub key: String,
     pub title: String,
     pub mirrors: Vec<(String, String)>,
+    /// Recorded in state but no longer on disk. Its mirrors can still be deleted.
+    pub orphan: bool,
 }
 
 impl Group {
     pub fn file(fmt: &str, key: String, title: &str) -> Group {
-        Group { fmt: fmt.into(), key, title: title.into(), mirrors: Vec::new() }
+        Group { fmt: fmt.into(), key, title: title.into(), mirrors: Vec::new(), orphan: false }
     }
     pub fn add_mirror(&mut self, target: &str, path: String) {
         self.mirrors.push((target.into(), path));
@@ -94,7 +96,12 @@ pub fn list_groups(roots: &Roots, state: &State) -> Vec<Group> {
         if state.mirror_keys.contains(key) {
             continue;
         }
-        let g = by_key.entry(key.clone()).or_insert_with(|| Group::file(&src.fmt, key.clone(), &file_name(key)));
+        let g = by_key.entry(key.clone()).or_insert_with(|| {
+            let mut g = Group::file(&src.fmt, key.clone(), &file_name(key));
+            // Not found among the files on disk: keep it, flagged as an orphan.
+            g.orphan = true;
+            g
+        });
         for (t, m) in &src.mirrors {
             g.add_mirror(t, m.path.clone());
         }
@@ -154,6 +161,9 @@ pub fn delete_group(roots: &Roots, g: &Group, lock_dir: &Path, hslock: &Path) ->
 /// Rename a source by rewriting only its title record. Refused outside the roots.
 pub fn rename_group(roots: &Roots, g: &Group, title: &str, lock_dir: &Path, hslock: &Path) -> Result<String, String> {
     let new = validate_title(title)?;
+    if g.orphan {
+        return Err("source is not on disk; nothing to rename".into());
+    }
     let path = PathBuf::from(&g.key);
     if !roots.contains(&path) {
         return Err(format!("source outside session roots, not renaming: {}", path.display()));
