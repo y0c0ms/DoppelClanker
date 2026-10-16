@@ -1,0 +1,97 @@
+//! Postgres implementation of the service `Store`. It persists what the service decides and
+//! holds no rules of its own. Spaces are stored as wrapped bytes (see `wrap`), records as
+//! sealed bytes; gates and backup policies as their serialized form. Nothing is readable
+//! from the database without the master key.
+
+use crate::backup::{BackupPolicy, Retention};
+use crate::service::Store;
+use crate::spaces::Space;
+use crate::totp::JoinGate;
+use postgres::{Client, NoTls};
+use std::cell::RefCell;
+
+pub struct PgStore {
+    client: RefCell<Client>,
+    master: [u8; 32],
+}
+
+impl PgStore {
+    pub fn connect(url: &str, master: [u8; 32]) -> Result<PgStore, String> {
+        let client = Client::connect(url, NoTls).map_err(|e| e.to_string())?;
+        Ok(PgStore { client: RefCell::new(client), master })
+    }
+
+    /// Create the tables. For tests and first start; migrations come later.
+    pub fn reset(&self) -> Result<(), String> {
+        self.client.borrow_mut().batch_execute(
+            "DROP TABLE IF EXISTS records, spaces, gates, backups;
+             CREATE TABLE spaces (name TEXT PRIMARY KEY, wrapped BYTEA NOT NULL);
+             CREATE TABLE records (space TEXT NOT NULL, conversation TEXT NOT NULL,
+                 sealed BYTEA NOT NULL, PRIMARY KEY (space, conversation));
+             CREATE TABLE gates (space TEXT NOT NULL, machine TEXT NOT NULL, state BYTEA NOT NULL,
+                 PRIMARY KEY (space, machine));
+             CREATE TABLE backups (space TEXT PRIMARY KEY, policy TEXT NOT NULL);",
+        ).map_err(|e| e.to_string())
+    }
+
+    fn one_bytes(&self, sql: &str, params: &[&(dyn postgres::types::ToSql + Sync)]) -> Option<Vec<u8>> {
+        self.client.borrow_mut().query_opt(sql, params).ok().flatten().map(|r| r.get::<_, Vec<u8>>(0))
+    }
+}
+
+impl Store for PgStore {
+    fn load_space(&self, name: &str) -> Option<Space> {
+        let wrapped = self.one_bytes("SELECT wrapped FROM spaces WHERE name = $1", &[&name])?;
+        crate::wrap::unwrap_space(&wrapped, &self.master).ok()
+    }
+
+    fn save_space(&mut self, space: Space) {
+        if let Ok(wrapped) = crate::wrap::wrap_space(&space, &self.master) {
+            let _ = self.client.borrow_mut().execute(
+                "INSERT INTO spaces (name, wrapped) VALUES ($1, $2)
+                 ON CONFLICT (name) DO UPDATE SET wrapped = EXCLUDED.wrapped",
+                &[&space.name, &wrapped]);
+        }
+    }
+
+    fn record(&self, space: &str, conv: &str) -> Option<Vec<u8>> {
+        self.one_bytes("SELECT sealed FROM records WHERE space = $1 AND conversation = $2", &[&space, &conv])
+    }
+
+    fn put_record(&mut self, space: &str, conv: &str, sealed: Vec<u8>) {
+        let _ = self.client.borrow_mut().execute(
+            "INSERT INTO records (space, conversation, sealed) VALUES ($1, $2, $3)
+             ON CONFLICT (space, conversation) DO UPDATE SET sealed = EXCLUDED.sealed",
+            &[&space, &conv, &sealed]);
+    }
+
+    fn load_gate(&self, space: &str, machine: &str) -> Option<JoinGate> {
+        let state = self.one_bytes("SELECT state FROM gates WHERE space = $1 AND machine = $2", &[&space, &machine])?;
+        JoinGate::from_bytes(&state, &self.master)
+    }
+
+    fn save_gate(&mut self, space: &str, machine: &str, gate: JoinGate) {
+        let state = gate.to_bytes(&self.master);
+        let _ = self.client.borrow_mut().execute(
+            "INSERT INTO gates (space, machine, state) VALUES ($1, $2, $3)
+             ON CONFLICT (space, machine) DO UPDATE SET state = EXCLUDED.state",
+            &[&space, &machine, &state]);
+    }
+
+    fn load_backup(&self, space: &str) -> Option<BackupPolicy> {
+        let row = self.client.borrow_mut()
+            .query_opt("SELECT policy FROM backups WHERE space = $1", &[&space]).ok().flatten()?;
+        serde_json::from_str(&row.get::<_, String>(0)).ok()
+    }
+
+    fn save_backup(&mut self, space: &str, policy: BackupPolicy) {
+        let text = serde_json::to_string(&policy).unwrap_or_default();
+        let _ = self.client.borrow_mut().execute(
+            "INSERT INTO backups (space, policy) VALUES ($1, $2)
+             ON CONFLICT (space) DO UPDATE SET policy = EXCLUDED.policy",
+            &[&space, &text]);
+    }
+}
+
+#[allow(dead_code)]
+fn _retention_is_used(r: Retention) -> Retention { r }

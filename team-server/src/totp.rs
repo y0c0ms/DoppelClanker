@@ -33,6 +33,63 @@ pub fn code_at(secret: &[u8], time: u64) -> String {
     format!("{:06}", bin % 1_000_000)
 }
 
+impl JoinGate {
+    /// A copy of the gate's state, for loading from a store.
+    pub fn clone_state(&self) -> JoinGate {
+        JoinGate {
+            secret: self.secret.clone(),
+            used: self.used.clone(),
+            failures: self.failures,
+            locked_until: self.locked_until,
+        }
+    }
+}
+
+impl JoinGate {
+    /// Serialize the gate state, sealed under the master key. The secret is included, so it
+    /// is only ever stored wrapped.
+    pub fn to_bytes(&self, master: &[u8; 32]) -> Vec<u8> {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&(self.secret.len() as u32).to_le_bytes());
+        plain.extend_from_slice(&self.secret);
+        plain.extend_from_slice(&self.failures.to_le_bytes());
+        plain.extend_from_slice(&self.locked_until.to_le_bytes());
+        let mut used: Vec<_> = self.used.iter().collect();
+        used.sort();
+        plain.extend_from_slice(&(used.len() as u32).to_le_bytes());
+        for (step, code) in used {
+            plain.extend_from_slice(&step.to_le_bytes());
+            plain.extend_from_slice(&(code.len() as u32).to_le_bytes());
+            plain.extend_from_slice(code.as_bytes());
+        }
+        crate::spaces::seal(master, b"join gate v1", &plain).unwrap_or_default()
+    }
+
+    /// Restore a gate from its sealed form. None if the master key is wrong or the bytes are damaged.
+    pub fn from_bytes(sealed: &[u8], master: &[u8; 32]) -> Option<JoinGate> {
+        let plain = crate::spaces::open_bound(master, b"join gate v1", sealed).ok()?;
+        let mut c = 0usize;
+        let take = |c: &mut usize, n: usize| -> Option<&[u8]> {
+            let s = plain.get(*c..*c + n)?;
+            *c += n;
+            Some(s)
+        };
+        let n = u32::from_le_bytes(take(&mut c, 4)?.try_into().ok()?) as usize;
+        let secret = take(&mut c, n)?.to_vec();
+        let failures = u32::from_le_bytes(take(&mut c, 4)?.try_into().ok()?);
+        let locked_until = u64::from_le_bytes(take(&mut c, 8)?.try_into().ok()?);
+        let n_used = u32::from_le_bytes(take(&mut c, 4)?.try_into().ok()?) as usize;
+        let mut used = std::collections::HashSet::new();
+        for _ in 0..n_used {
+            let step = u64::from_le_bytes(take(&mut c, 8)?.try_into().ok()?);
+            let len = u32::from_le_bytes(take(&mut c, 4)?.try_into().ok()?) as usize;
+            let code = String::from_utf8(take(&mut c, len)?.to_vec()).ok()?;
+            used.insert((step, code));
+        }
+        Some(JoinGate { secret, used, failures, locked_until })
+    }
+}
+
 /// Gate for one user's join attempts: single use per code, and a lock after repeated failures.
 pub struct JoinGate {
     secret: Vec<u8>,
