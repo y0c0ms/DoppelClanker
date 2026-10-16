@@ -34,6 +34,29 @@ jobs:
           HOME="$SANDBOX/home" sh install.sh --prefix "$SANDBOX/prefix" --no-build
           plutil -lint "$SANDBOX/home/Library/LaunchAgents/com.harnesssync.watch.plist"
 
+  team-server-postgres:
+    name: team server against a real Postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-only-throwaway
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: run the Postgres tests, which must not skip
+        working-directory: team-server
+        env:
+          TEAM_TEST_PG: postgres://postgres:ci-only-throwaway@127.0.0.1:5432/postgres
+          TEAM_REQUIRE_PG: "1"
+        run: cargo test --test postgres_store --test startup_retry
+
   windows:
     name: build and smoke test (windows)
     runs-on: windows-latest
