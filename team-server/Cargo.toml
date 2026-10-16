@@ -16,4 +16,9 @@ rand = "0.8"
 sha1 = "0.10"
 postgres = "0.19"
 axum = "0.7"
-tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+proptest = "1"
