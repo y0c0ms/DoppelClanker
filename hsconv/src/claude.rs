@@ -282,6 +282,25 @@ mod tests {
     }
 
     #[test]
+    fn an_image_survives_omp_to_claude_and_back() {
+        let journal_src = r#"{"type":"session","version":3,"id":"s","timestamp":"2026-10-01T10:00:00.000Z","cwd":"/tmp/c"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-10-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"what is this"},{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-10-01T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"A logo."}]}}
+"#;
+        let path = std::env::temp_dir().join(format!("hs-img-rt-{}.jsonl", std::process::id()));
+        std::fs::write(&path, journal_src).unwrap();
+        let j = Journal::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let out = to_lines(&j, &Options { session_id: "s5", cwd: "/tmp/c", cli_version: "2.1.245" });
+        let claude_text = out.join("\n");
+        assert!(claude_text.contains("\"type\":\"image\""), "image must be written for Claude");
+        assert!(claude_text.contains("iVBORw0KGgo="));
+        let (back, stats) = crate::from_claude::to_journal_lines(&claude_text).unwrap();
+        assert_eq!(stats.images, 1, "the image must come back");
+        assert!(back.join("\n").contains("iVBORw0KGgo="));
+    }
+
+    #[test]
     fn the_parent_chain_is_unbroken() {
         let (lines, _) = crate::from_claude::to_journal_lines(TOOLS).unwrap();
         let out = to_lines(&journal_of(&lines), &Options { session_id: "s2", cwd: "/tmp/c", cli_version: "2.1.245" });
