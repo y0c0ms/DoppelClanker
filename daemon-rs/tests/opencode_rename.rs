@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 struct Fake {
     port: u16,
     patched: Arc<Mutex<Vec<(String, String)>>>,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn fake_server(known_id: &str) -> Fake {
@@ -20,8 +21,15 @@ fn fake_server(known_id: &str) -> Fake {
     let patched = Arc::new(Mutex::new(Vec::new()));
     let log = patched.clone();
     let known = known_id.to_string();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_flag = stopped.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                // A stopped server refuses service: drop the connection without answering.
+                drop(stream);
+                continue;
+            }
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             if reader.read_line(&mut line).is_err() { continue; }
@@ -38,7 +46,10 @@ fn fake_server(known_id: &str) -> Fake {
             }
             let mut body = vec![0u8; len];
             let _ = reader.read_exact(&mut body);
-            let (status, reply) = if method == "GET" && path == "/session" {
+            let (status, reply) = if method == "POST" && path == "/__stop" {
+                stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                ("200 OK", "{}".to_string())
+            } else if method == "GET" && path == "/session" {
                 ("200 OK", "[]".to_string())
             } else if method == "PATCH" && path.starts_with("/session/") {
                 let id = path.trim_start_matches("/session/").to_string();
@@ -57,7 +68,7 @@ fn fake_server(known_id: &str) -> Fake {
             let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
         }
     });
-    Fake { port, patched }
+    Fake { port, patched, stopped }
 }
 
 const SID: &str = "ses_abc123def456ghi789jkl012mn";
@@ -69,9 +80,18 @@ fn a_running_server_is_reused_and_not_stopped() {
         .expect("rename through the running server");
     assert_eq!(saved, "New name");
     assert_eq!(fake.patched.lock().unwrap().as_slice(), &[(SID.to_string(), "New name".to_string())]);
-    // The server belongs to someone else: it must still answer after the rename.
-    let still_up = std::net::TcpStream::connect(("127.0.0.1", fake.port)).is_ok();
-    assert!(still_up, "a server we did not start must not be stopped by the rename");
+    // The server belongs to someone else: after the rename it must still serve requests.
+    // A real request, not just a TCP connect, so a stopped server fails this check.
+    let served = std::net::TcpStream::connect(("127.0.0.1", fake.port)).and_then(|mut s| {
+        use std::io::{Read, Write};
+        write!(s, "GET /session HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?;
+        let mut out = String::new();
+        s.read_to_string(&mut out)?;
+        Ok(out)
+    });
+    assert!(served.map(|r| r.starts_with("HTTP/1.1 200")).unwrap_or(false),
+        "a server we did not start must still serve after the rename");
+    assert!(!fake.stopped.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]
