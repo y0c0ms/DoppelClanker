@@ -8,8 +8,15 @@
 //!   sessionId, cwd      -> session header
 //!   user / assistant    -> message records (role from `message.role`)
 //!   text blocks         -> text content blocks
-//!   tool_use / tool_result, thinking, attachment, file-history-snapshot,
-//!   mode, permission-mode, system, last-prompt -> not converted; counted
+//!   tool_use            -> toolCall block {id, name, arguments} in the assistant message
+//!   tool_result         -> one toolResult message per result {toolCallId, toolName,
+//!                          content, isError}, placed right after the record it came from
+//!   thinking, attachment, file-history-snapshot, mode, permission-mode, system,
+//!   last-prompt -> not converted; counted
+//!
+//! Tool results are paired with calls by id, as Claude requires: a result whose call was
+//! never seen (orphan) or a second result for the same call (duplicate) is dropped and
+//! counted. Rules from session-migrate (xhluca, MIT); see docs/research/session-fidelity.md.
 //!   isMeta user records and `<tag>` wrapper text -> not conversation turns
 //!
 //! Claude signs its reasoning blocks and cannot accept ours back, so thinking
@@ -24,6 +31,10 @@ pub struct Stats {
     pub skipped_tool_blocks: usize,
     pub skipped_thinking_blocks: usize,
     pub skipped_records: usize,
+    pub tool_calls: usize,
+    pub tool_results: usize,
+    pub orphan_tool_results: usize,
+    pub duplicate_tool_results: usize,
 }
 
 /// Convert the whole transcript text. Returns the omp journal lines, header
@@ -39,6 +50,14 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
     // kept message's parent is found by walking up through skipped ones.
     let mut parent_of: std::collections::HashMap<String, Option<String>> = Default::default();
     let mut kept_parent: Vec<(String, Option<String>)> = Vec::new();
+    // A source record that was split into several messages: its uuid -> the id of the last
+    // one, so a later record whose parent is that uuid links to the end of the split.
+    let mut alias: std::collections::HashMap<String, String> = Default::default();
+    // Tool call id -> tool name, for every call seen so far; results pair against it.
+    let mut calls: std::collections::HashMap<String, String> = Default::default();
+    let mut answered: std::collections::HashSet<String> = Default::default();
+    // Results split off a source record, as (id, message) pairs placed after it.
+    let mut result_msgs: Vec<(String, Map<String, Value>)>;
 
     for (n, line) in raw.lines().enumerate() {
         let t = line.trim();
@@ -79,6 +98,7 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
         };
         let role = msg.get("role").and_then(Value::as_str).unwrap_or(kind);
         let mut content: Vec<Value> = Vec::new();
+        result_msgs = Vec::new();
         match msg.get("content") {
             Some(Value::String(s)) => {
                 if is_real_text(s) {
@@ -97,6 +117,57 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
                             }
                         }
                         Some("thinking") | Some("redacted_thinking") => stats.skipped_thinking_blocks += 1,
+                        Some("tool_use") if role == "assistant" => {
+                            let id = b.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                            let name = b.get("name").and_then(Value::as_str).unwrap_or("unknown_tool").to_string();
+                            let mut args = b.get("input").cloned().unwrap_or_else(|| json!({}));
+                            if !args.is_object() {
+                                args = json!({"input": args});
+                            }
+                            if id.is_empty() {
+                                stats.skipped_tool_blocks += 1;
+                                continue;
+                            }
+                            calls.insert(id.clone(), name.clone());
+                            content.push(json!({"type": "toolCall", "id": id, "name": name, "arguments": args}));
+                            stats.tool_calls += 1;
+                        }
+                        Some("tool_result") => {
+                            let cid = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("").to_string();
+                            let Some(name) = calls.get(&cid).cloned() else {
+                                stats.orphan_tool_results += 1;
+                                continue;
+                            };
+                            if !answered.insert(cid.clone()) {
+                                stats.duplicate_tool_results += 1;
+                                continue;
+                            }
+                            let mut text_blocks: Vec<Value> = Vec::new();
+                            match b.get("content") {
+                                Some(Value::String(t)) => text_blocks.push(json!({"type": "text", "text": t})),
+                                Some(Value::Array(items)) => {
+                                    for it in items {
+                                        if it.get("type").and_then(Value::as_str) == Some("text") {
+                                            let t = it.get("text").and_then(Value::as_str).unwrap_or("");
+                                            text_blocks.push(json!({"type": "text", "text": t}));
+                                        } else {
+                                            stats.skipped_tool_blocks += 1;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            let is_error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                            let rid = format!("{}-r{}", r.get("uuid").and_then(Value::as_str).unwrap_or(""), result_msgs.len());
+                            let mut m = Map::new();
+                            m.insert("role".into(), "toolResult".into());
+                            m.insert("toolCallId".into(), cid.into());
+                            m.insert("toolName".into(), name.into());
+                            m.insert("content".into(), Value::Array(text_blocks));
+                            m.insert("isError".into(), is_error.into());
+                            result_msgs.push((rid, m));
+                            stats.tool_results += 1;
+                        }
                         Some(_) => stats.skipped_tool_blocks += 1,
                         None => {}
                     }
@@ -104,26 +175,54 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
             }
             _ => {}
         }
-        if content.is_empty() {
+        if content.is_empty() && result_msgs.is_empty() {
             stats.skipped_records += 1;
             continue;
         }
         let id = r.get("uuid").and_then(Value::as_str).unwrap_or("").to_string();
         let parent = r.get("parentUuid").and_then(Value::as_str).map(str::to_string);
         let ts = r.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string();
-        // Resolved after the loop, once every record is known.
-        kept_parent.push((id.clone(), parent.clone()));
         if first_ts.is_empty() && !ts.is_empty() {
             first_ts = ts.clone();
         }
-        let mut m = Map::new();
-        m.insert("type".into(), "message".into());
-        m.insert("id".into(), id.into());
-        m.insert("parentId".into(), parent.map(Value::from).unwrap_or(Value::Null));
-        m.insert("timestamp".into(), ts.into());
-        m.insert("message".into(), json!({"role": role, "content": content}));
-        out.push(m);
-        stats.messages += 1;
+        // The source record's own content, if any, keeps the source uuid.
+        let mut chain_parent = parent.clone();
+        let mut last_id: Option<String> = None;
+        if !content.is_empty() {
+            kept_parent.push((id.clone(), parent.clone()));
+            let mut m = Map::new();
+            m.insert("type".into(), "message".into());
+            m.insert("id".into(), id.clone().into());
+            m.insert("parentId".into(), parent.clone().map(Value::from).unwrap_or(Value::Null));
+            m.insert("timestamp".into(), ts.clone().into());
+            m.insert("message".into(), json!({"role": role, "content": content}));
+            out.push(m);
+            stats.messages += 1;
+            last_id = Some(id.clone());
+        }
+        // Each result is its own message, chained one after another. The first result
+        // links to the source's parent (the record holding the call); later ones link to
+        // the result before them. Results are resolved against the source parent below.
+        for (rid, rm) in result_msgs.drain(..) {
+            let p = last_id.clone().or_else(|| chain_parent.clone());
+            kept_parent.push((rid.clone(), p.clone()));
+            let mut m = Map::new();
+            m.insert("type".into(), "message".into());
+            m.insert("id".into(), rid.clone().into());
+            m.insert("parentId".into(), p.map(Value::from).unwrap_or(Value::Null));
+            m.insert("timestamp".into(), ts.clone().into());
+            m.insert("message".into(), Value::Object(rm));
+            out.push(m);
+            stats.messages += 1;
+            last_id = Some(rid);
+            chain_parent = None;
+        }
+        // Later records whose parent is this source uuid must link to its last message.
+        if let Some(l) = &last_id {
+            if *l != id {
+                alias.insert(id.clone(), l.clone());
+            }
+        }
     }
 
     if stats.messages == 0 {
@@ -137,6 +236,9 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
         let mut cur = start;
         let mut seen = std::collections::HashSet::new();
         while let Some(id) = cur.take() {
+            if let Some(a) = alias.get(&id) {
+                return Some(a.clone());
+            }
             if kept.contains(&id) {
                 return Some(id);
             }
@@ -199,6 +301,105 @@ mod tests {
         assert_eq!(stats.messages, 3);
     }
 
+    // A turn with a tool call and its result, as Claude Code writes them: the call is a
+    // tool_use block in an assistant record; the result is a tool_result block in the
+    // next user record, linked by tool_use_id.
+    const TOOLS: &str = concat!(
+        r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","cwd":"/tmp/c","timestamp":"2026-10-01T10:00:00.000Z","message":{"role":"user","content":"list files"}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s","timestamp":"2026-10-01T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Listing."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}"#, "\n",
+        r#"{"type":"user","uuid":"r1","parentUuid":"a1","sessionId":"s","timestamp":"2026-10-01T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.txt\nb.txt","is_error":false}]}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a2","parentUuid":"r1","sessionId":"s","timestamp":"2026-10-01T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Two files."}]}}"#, "\n",
+    );
+
+    fn records(lines: &[String]) -> Vec<Value> {
+        lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    #[test]
+    fn tool_use_becomes_a_tool_call_block() {
+        let (lines, stats) = to_journal_lines(TOOLS).unwrap();
+        let r = records(&lines);
+        let a1 = r.iter().find(|m| m["id"] == "a1").expect("assistant turn kept");
+        let call = &a1["message"]["content"][1];
+        assert_eq!(call["type"], "toolCall");
+        assert_eq!(call["id"], "toolu_1");
+        assert_eq!(call["name"], "Bash");
+        assert_eq!(call["arguments"]["command"], "ls");
+        assert_eq!(stats.tool_calls, 1);
+    }
+
+    #[test]
+    fn tool_result_becomes_a_tool_result_message_linked_to_its_call() {
+        let (lines, stats) = to_journal_lines(TOOLS).unwrap();
+        let r = records(&lines);
+        let res = r.iter().find(|m| m["message"]["role"] == "toolResult").expect("result kept");
+        assert_eq!(res["message"]["toolCallId"], "toolu_1");
+        assert_eq!(res["message"]["toolName"], "Bash");
+        assert_eq!(res["message"]["isError"], false);
+        assert_eq!(res["message"]["content"][0]["text"], "a.txt\nb.txt");
+        assert_eq!(res["parentId"], "a1", "the result follows the call that made it");
+        assert_eq!(stats.tool_results, 1);
+        assert_eq!(stats.skipped_tool_blocks, 0);
+    }
+
+    #[test]
+    fn the_turn_after_a_tool_result_links_to_the_result() {
+        let (lines, _) = to_journal_lines(TOOLS).unwrap();
+        let r = records(&lines);
+        let res_id = r.iter().find(|m| m["message"]["role"] == "toolResult").unwrap()["id"].clone();
+        let a2 = r.iter().find(|m| m["id"] == "a2").unwrap();
+        assert_eq!(a2["parentId"], res_id, "the chain must run through the tool result");
+    }
+
+    #[test]
+    fn an_error_result_keeps_is_error_and_list_content_keeps_its_text() {
+        let raw = concat!(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","message":{"role":"user","content":"go"}}"#, "\n",
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s","message":{"role":"assistant","content":[{"type":"tool_use","id":"t9","name":"Read","input":{"path":"x"}}]}}"#, "\n",
+            r#"{"type":"user","uuid":"r1","parentUuid":"a1","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","is_error":true,"content":[{"type":"text","text":"no such file"}]}]}}"#, "\n",
+        );
+        let (lines, _) = to_journal_lines(raw).unwrap();
+        let r = records(&lines);
+        let res = r.iter().find(|m| m["message"]["role"] == "toolResult").unwrap();
+        assert_eq!(res["message"]["isError"], true);
+        assert_eq!(res["message"]["content"][0]["text"], "no such file");
+    }
+
+    #[test]
+    fn a_result_with_no_matching_call_is_dropped_and_counted() {
+        // Claude rejects a tool_result whose call is missing, so it must not be carried.
+        let raw = concat!(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","message":{"role":"user","content":"go"}}"#, "\n",
+            r#"{"type":"user","uuid":"r1","parentUuid":"u1","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"ghost","content":"x"}]}}"#, "\n",
+        );
+        let (lines, stats) = to_journal_lines(raw).unwrap();
+        assert!(records(&lines).iter().all(|m| m["message"]["role"] != "toolResult"));
+        assert_eq!(stats.orphan_tool_results, 1);
+    }
+
+    #[test]
+    fn a_duplicate_result_for_the_same_call_is_dropped_and_counted() {
+        let raw = concat!(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","message":{"role":"user","content":"go"}}"#, "\n",
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#, "\n",
+            r#"{"type":"user","uuid":"r1","parentUuid":"a1","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"first"}]}}"#, "\n",
+            r#"{"type":"user","uuid":"r2","parentUuid":"r1","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"again"}]}}"#, "\n",
+        );
+        let (lines, stats) = to_journal_lines(raw).unwrap();
+        let n = records(&lines).iter().filter(|m| m["message"]["role"] == "toolResult").count();
+        assert_eq!(n, 1, "only the first result for a call is kept");
+        assert_eq!(stats.duplicate_tool_results, 1);
+    }
+
+    #[test]
+    fn a_session_of_only_tool_turns_still_converts() {
+        let raw = concat!(
+            r#"{"type":"assistant","uuid":"a1","parentUuid":null,"sessionId":"s","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#, "\n",
+            r#"{"type":"user","uuid":"r1","parentUuid":"a1","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#, "\n",
+        );
+        assert!(to_journal_lines(raw).is_ok(), "tool calls are conversation content");
+    }
+
     #[test]
     fn thinking_is_dropped_never_carried() {
         let (lines, stats) = to_journal_lines(T).unwrap();
@@ -254,7 +455,10 @@ mod tests {
         let j = crate::journal::Journal::read(&path).unwrap();
         let active = j.messages();
         let _ = std::fs::remove_file(&path);
-        assert_eq!(active.len(), 3, "all three kept turns must be on the active path");
+        // The tool turn is now kept as a toolCall message, so all four turns are on the path,
+        // in source order. (Before tool calls were carried, the tool turn was dropped.)
+        let ids: Vec<&str> = active.iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["u1", "a1", "a_tool", "u2"], "every kept turn on the active path, in order");
     }
 
     #[test]

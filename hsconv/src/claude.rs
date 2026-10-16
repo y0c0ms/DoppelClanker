@@ -136,3 +136,74 @@ pub fn to_lines(j: &Journal, o: &Options) -> Vec<String> {
 pub fn bucket(cwd: &str) -> String {
     cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn journal_of(lines: &[String]) -> Journal {
+        let path = std::env::temp_dir().join(format!("hs-claude-rt-{}-{}.jsonl", std::process::id(),
+            lines.len()));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let j = Journal::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        j
+    }
+
+    const TOOLS: &str = concat!(
+        r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","cwd":"/tmp/c","timestamp":"2026-10-01T10:00:00.000Z","message":{"role":"user","content":"list files"}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s","timestamp":"2026-10-01T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Listing."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}"#, "\n",
+        r#"{"type":"user","uuid":"r1","parentUuid":"a1","sessionId":"s","timestamp":"2026-10-01T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.txt","is_error":true}]}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a2","parentUuid":"r1","sessionId":"s","timestamp":"2026-10-01T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}"#, "\n",
+    );
+
+    #[test]
+    fn a_claude_tool_call_and_result_survive_a_round_trip_through_the_journal() {
+        let (lines, _) = crate::from_claude::to_journal_lines(TOOLS).unwrap();
+        let j = journal_of(&lines);
+        let out = to_lines(&j, &Options { session_id: "s2", cwd: "/tmp/c", cli_version: "2.1.245" });
+        let recs: Vec<Value> = out.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+
+        let call = recs.iter().flat_map(|r| r["message"]["content"].as_array().cloned().unwrap_or_default())
+            .find(|b| b["type"] == "tool_use").expect("tool_use carried back into Claude");
+        assert_eq!(call["id"], "toolu_1");
+        assert_eq!(call["name"], "Bash");
+        assert_eq!(call["input"]["command"], "ls");
+
+        let result = recs.iter().flat_map(|r| r["message"]["content"].as_array().cloned().unwrap_or_default())
+            .find(|b| b["type"] == "tool_result").expect("tool_result carried back into Claude");
+        assert_eq!(result["tool_use_id"], "toolu_1", "the result still answers its call");
+        assert_eq!(result["is_error"], true);
+        assert_eq!(result["content"], "a.txt");
+    }
+
+    #[test]
+    fn every_tool_result_in_the_output_answers_an_earlier_tool_use() {
+        // Claude rejects a tool_result with no tool_use before it. Check the output order.
+        let (lines, _) = crate::from_claude::to_journal_lines(TOOLS).unwrap();
+        let out = to_lines(&journal_of(&lines), &Options { session_id: "s2", cwd: "/tmp/c", cli_version: "2.1.245" });
+        let mut seen = std::collections::HashSet::new();
+        for l in &out {
+            let r: Value = serde_json::from_str(l).unwrap();
+            for b in r["message"]["content"].as_array().cloned().unwrap_or_default() {
+                if b["type"] == "tool_use" {
+                    seen.insert(b["id"].as_str().unwrap().to_string());
+                }
+                if b["type"] == "tool_result" {
+                    assert!(seen.contains(b["tool_use_id"].as_str().unwrap()),
+                        "tool_result before its tool_use: {l}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_parent_chain_is_unbroken() {
+        let (lines, _) = crate::from_claude::to_journal_lines(TOOLS).unwrap();
+        let out = to_lines(&journal_of(&lines), &Options { session_id: "s2", cwd: "/tmp/c", cli_version: "2.1.245" });
+        let recs: Vec<Value> = out.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        for w in recs.windows(2) {
+            assert_eq!(w[1]["parentUuid"], w[0]["uuid"], "each record follows the one before it");
+        }
+    }
+}
