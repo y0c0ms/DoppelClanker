@@ -17,6 +17,7 @@ struct Env {
     omp: PathBuf,
     pi: PathBuf,
     claude: PathBuf,
+    gemini: PathBuf,
     opencode_db: PathBuf,
     opencode_bin: PathBuf,
     hsconv: PathBuf,
@@ -35,6 +36,7 @@ impl Env {
             omp: get("OMP_AGENT_DIR", home.join(".omp/agent")),
             pi: get("PI_AGENT_DIR", home.join(".pi/agent")),
             claude: get("CLAUDE_CONFIG_DIR", home.join(".claude")),
+            gemini: get("GEMINI_CLI_HOME", home.join(".gemini")),
             opencode_db: get("OPENCODE_DB", home.join(".local/share/opencode/opencode.db")),
             opencode_bin: get("OPENCODE_BIN", PathBuf::from("opencode")),
             hsconv: get("HSCONV", home.join("bin/hsconv")),
@@ -78,13 +80,21 @@ fn is_mirror(state: &State, key: &str) -> bool {
 fn scan(env: &Env, state: &mut State) -> Vec<PassSource> {
     let now = now_secs();
     let mut out = Vec::new();
-    for (fmt, dir) in [("omp", &env.omp), ("pi", &env.pi)] {
-        if !dir.is_dir() {
+    // Claude sessions are sources too (the Python daemon synced them; the Rust port had
+    // dropped this path). Each format lists its own main sessions.
+    let claude_root = env.claude.clone();
+    let mut sources: Vec<(&str, Vec<PathBuf>)> = vec![
+        ("omp", if env.omp.is_dir() { discovery::jsonl_sessions(&env.omp) } else { Vec::new() }),
+        ("pi", if env.pi.is_dir() { discovery::jsonl_sessions(&env.pi) } else { Vec::new() }),
+        ("claude", discovery::claude_sessions(&claude_root)),
+    ];
+    for (fmt, paths) in sources.drain(..) {
+        if paths.is_empty() {
             continue;
         }
         let installed = installed_targets(env);
         let wanted_targets = installed.iter().filter(|t| t.as_str() != fmt).count();
-        for path in discovery::jsonl_sessions(dir) {
+        for path in paths {
             let key = path.display().to_string();
             if is_mirror(state, &key) {
                 continue;
@@ -125,7 +135,11 @@ fn scan(env: &Env, state: &mut State) -> Vec<PassSource> {
             let title = std::fs::read_to_string(&path)
                 .map(|text| {
                     let lines: Vec<&str> = text.lines().collect();
-                    titles::omp_title_from_lines(&lines).0
+                    if fmt == "claude" {
+                        titles::claude_title_from_lines(&lines).0
+                    } else {
+                        titles::omp_title_from_lines(&lines).0
+                    }
                 })
                 .unwrap_or_default();
             src.last_hash = hash;
@@ -133,7 +147,25 @@ fn scan(env: &Env, state: &mut State) -> Vec<PassSource> {
         }
     }
     out.extend(scan_opencode(env, state, now));
+    record_subagents(env, state);
     out
+}
+
+/// Record every subagent transcript under its parent session, so the TUI can show it there.
+/// Claude and Gemini keep subagent files next to their parent; OpenCode child sessions are
+/// rows with a parent_id and are handled by the source filter, not here.
+fn record_subagents(env: &Env, state: &mut State) {
+    let mut found: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (parent, path) in discovery::claude_subagents(&env.claude)
+        .into_iter()
+        .chain(discovery::gemini_subagents(&env.gemini))
+    {
+        found.entry(parent).or_default().push(path.display().to_string());
+    }
+    for files in found.values_mut() {
+        files.sort();
+    }
+    state.subagents = found;
 }
 
 /// O-penCode sessions that changed. Same rules as the Python: live sessions only,

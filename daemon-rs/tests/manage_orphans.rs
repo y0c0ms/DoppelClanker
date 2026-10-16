@@ -87,3 +87,44 @@ fn a_live_session_is_listed_and_not_an_orphan() {
     assert!(!g.orphan);
     assert_eq!(g.title, "Live");
 }
+
+#[test]
+fn a_session_lists_its_subagent_transcripts_read_only_and_they_are_not_groups() {
+    let sb = sandbox("subs");
+    let r = roots(&sb);
+    let dir = r.claude.join("-proj");
+    let parent = "ec447302-155c-4280-9c34-2b5122fcd4a4";
+    fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(format!("{parent}.jsonl"));
+    fs::write(&p, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+    let mut state = State::default();
+    state.subagents.insert(parent.into(), vec!["/x/agent-a1.jsonl".into()]);
+    let groups = list_groups(&r, &state);
+    let g = groups.iter().find(|g| g.key == p.display().to_string()).expect("parent listed");
+    assert_eq!(g.subagents, vec!["/x/agent-a1.jsonl".to_string()]);
+    assert!(groups.iter().all(|g| g.key != "/x/agent-a1.jsonl"),
+        "a subagent transcript must not be a conversation of its own");
+}
+
+#[test]
+fn deleting_a_session_leaves_its_subagent_transcripts_alone() {
+    // Subagent transcripts are read-only history; deleting the session must not remove them.
+    let sb = sandbox("subs-delete");
+    let r = roots(&sb);
+    let dir = r.claude.join("-proj");
+    let parent = "ec447302-155c-4280-9c34-2b5122fcd4a4";
+    fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(format!("{parent}.jsonl"));
+    fs::write(&p, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+    let sub = dir.join(parent).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    let a = sub.join("agent-a1.jsonl");
+    fs::write(&a, "keep me").unwrap();
+    let mut state = State::default();
+    state.subagents.insert(parent.into(), vec![a.display().to_string()]);
+    let g = list_groups(&r, &state).into_iter().find(|g| g.key == p.display().to_string()).unwrap();
+    rename_group(&r, &g, "Renamed", &sb.join("locks"), &sb.join("no-hslock")).unwrap();
+    assert_eq!(fs::read_to_string(&a).unwrap(), "keep me", "a rename must not touch subagent files");
+    harness_sync::manage::delete_group(&r, &g, &sb.join("locks"), &sb.join("no-hslock")).unwrap();
+    assert!(a.exists(), "deleting the session must not delete its subagent transcripts");
+}

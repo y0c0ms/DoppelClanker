@@ -1,0 +1,91 @@
+//! End to end: a Claude session with a subagent transcript. One pass must record the
+//! subagent under its parent in the state, and must not mirror the subagent as a
+//! conversation of its own. Real binary, sandbox stores only.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const BIN: &str = env!("CARGO_BIN_EXE_harness-sync");
+const PARENT: &str = "ec447302-155c-4280-9c34-2b5122fcd4a4";
+
+fn sandbox(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("hs-subagent-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn run(sb: &Path) -> std::process::Output {
+    Command::new(BIN)
+        .arg("--once")
+        .env("HARNESS_SYNC_DIR", sb.join("state"))
+        .env("OMP_AGENT_DIR", sb.join("omp"))
+        .env("PI_AGENT_DIR", sb.join("pi"))
+        .env("CLAUDE_CONFIG_DIR", sb.join("claude"))
+        .env("GEMINI_CLI_HOME", sb.join("gemini"))
+        .env("OPENCODE_DB", sb.join("no-opencode").join("opencode.db"))
+        .env("HSCONV", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hsconv/target/release/hsconv"))
+        .env("HSLOCK", sb.join("no-hslock"))
+        .env("HARNESS_SYNC_QUIET", "0")
+        .output()
+        .expect("run harness-sync")
+}
+
+#[test]
+fn a_subagent_is_recorded_under_its_parent_and_is_not_a_conversation() {
+    let sb = sandbox("e2e");
+    let dir = sb.join("claude").join("projects").join("-proj");
+    let sub = dir.join(PARENT).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(sb.join("pi").join("sessions")).unwrap();
+    let body = format!(
+        "{}\n",
+        format!(r#"{{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"{PARENT}","cwd":"/tmp/proj","timestamp":"2026-10-01T10:00:00.000Z","message":{{"role":"user","content":"{}"}}}}"#, "hello ".repeat(120)),
+    );
+    fs::write(dir.join(format!("{PARENT}.jsonl")), body).unwrap();
+    let sub_file = sub.join("agent-a1.jsonl");
+    fs::write(&sub_file, r#"{"type":"user","uuid":"s1","sessionId":"sub","isSidechain":true,"message":{"role":"user","content":"sub work"}}"#).unwrap();
+
+    let o = run(&sb);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+
+    let state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(sb.join("state").join("state.json")).unwrap()).unwrap();
+    let recorded = state["subagents"][PARENT].as_array().expect("subagent recorded under the parent");
+    assert_eq!(recorded.len(), 1);
+    assert!(recorded[0].as_str().unwrap().ends_with("agent-a1.jsonl"));
+
+    // The subagent must not be mirrored as a conversation: only the parent gets a pi mirror.
+    let mut mirrors = 0;
+    if let Ok(rd) = fs::read_dir(sb.join("pi").join("sessions")) {
+        for b in rd.flatten() {
+            if let Ok(files) = fs::read_dir(b.path()) { mirrors += files.flatten().count(); }
+        }
+    }
+    assert_eq!(mirrors, 1, "one mirror for the parent, none for the subagent");
+}
+
+#[test]
+fn a_claude_session_is_synced_as_a_source() {
+    // Regression: the Rust port had no Claude source at all, so a Claude session was
+    // never mirrored into pi or omp. A plain Claude session must produce a mirror.
+    let sb = sandbox("claude-source");
+    let dir = sb.join("claude").join("projects").join("-proj");
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(sb.join("pi").join("sessions")).unwrap();
+    let body = format!(
+        "{}\n",
+        format!(r#"{{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"{PARENT}","cwd":"/tmp/proj","timestamp":"2026-10-01T10:00:00.000Z","message":{{"role":"user","content":"{}"}}}}"#, "hello ".repeat(120)),
+    );
+    fs::write(dir.join(format!("{PARENT}.jsonl")), body).unwrap();
+    let o = run(&sb);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    let mut mirrors = 0;
+    if let Ok(rd) = fs::read_dir(sb.join("pi").join("sessions")) {
+        for b in rd.flatten() {
+            if let Ok(files) = fs::read_dir(b.path()) { mirrors += files.flatten().count(); }
+        }
+    }
+    assert_eq!(mirrors, 1, "a Claude session must be mirrored into pi");
+}

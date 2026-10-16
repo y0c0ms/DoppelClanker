@@ -88,3 +88,29 @@ fn corrupt_state_is_an_error_not_silently_empty() {
     fs::write(&f, "{not json").unwrap();
     assert!(State::load(&f).is_err());
 }
+
+#[test]
+fn subagent_transcripts_are_recorded_under_their_parent_and_round_trip() {
+    let d = tmp("subagents");
+    let f = d.join("state.json");
+    let mut s = State::default();
+    s.subagents
+        .entry("ec447302-155c-4280-9c34-2b5122fcd4a4".into())
+        .or_default()
+        .push("/projects/-proj/ec447302/subagents/agent-a1.jsonl".into());
+    s.save(&f).unwrap();
+    let back = State::load(&f).unwrap();
+    assert_eq!(back.subagents["ec447302-155c-4280-9c34-2b5122fcd4a4"],
+               vec!["/projects/-proj/ec447302/subagents/agent-a1.jsonl".to_string()]);
+}
+
+#[test]
+fn a_state_file_written_before_subagents_existed_still_loads() {
+    // The state layout must stay compatible: an older file has no "subagents" key.
+    let d = tmp("old-state");
+    let f = d.join("state.json");
+    fs::write(&f, PY_STATE).unwrap();
+    let s = State::load(&f).unwrap();
+    assert!(s.subagents.is_empty());
+    assert!(s.sources.contains_key("omp:/x/a.jsonl"));
+}

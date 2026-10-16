@@ -37,11 +37,14 @@ pub struct Group {
     pub mirrors: Vec<(String, String)>,
     /// Recorded in state but no longer on disk. Its mirrors can still be deleted.
     pub orphan: bool,
+    /// Subagent transcripts of this session, read-only: shown, never synced or deleted.
+    pub subagents: Vec<String>,
 }
 
 impl Group {
     pub fn file(fmt: &str, key: String, title: &str) -> Group {
-        Group { fmt: fmt.into(), key, title: title.into(), mirrors: Vec::new(), orphan: false }
+        Group { fmt: fmt.into(), key, title: title.into(), mirrors: Vec::new(), orphan: false,
+                subagents: Vec::new() }
     }
     pub fn add_mirror(&mut self, target: &str, path: String) {
         self.mirrors.push((target.into(), path));
@@ -106,6 +109,12 @@ pub fn list_groups(roots: &Roots, state: &State) -> Vec<Group> {
             g.add_mirror(t, m.path.clone());
         }
     }
+    // Attach each session's recorded subagent transcripts, read-only.
+    for (key, g) in by_key.iter_mut() {
+        if let Some(subs) = state.subagents.get(&session_id_of(key)) {
+            g.subagents = subs.clone();
+        }
+    }
     by_key.into_values().collect()
 }
 
@@ -119,6 +128,19 @@ fn session_title(path: &str, fmt: &str) -> String {
         _ => crate::titles::omp_title_from_lines(&lines).0,
     };
     if title.is_empty() { "untitled".into() } else { title }
+}
+
+/// The session id a source file belongs to: the uuid in its name (omp/Pi or Claude), or
+/// the file stem for anything else. Subagent lists are keyed by this id.
+fn session_id_of(key: &str) -> String {
+    let name = file_name(key);
+    let stem = name.strip_suffix(".jsonl").unwrap_or(&name);
+    if let Some((_, id)) = stem.rsplit_once('_') {
+        if id.len() == 36 {
+            return id.to_string();
+        }
+    }
+    stem.to_string()
 }
 
 fn file_name(p: &str) -> String {
