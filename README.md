@@ -84,7 +84,18 @@ hsconv ids <file.jsonl>        # list session ids in a journal
 
 ## Acknowledgements
 
-Claude Code session conversion builds on the approach in session-migrate.
+Session conversion in `hsconv` is inspired by
+[session-migrate](https://github.com/xhluca/session-migrate) by Xing Han Lu (xhluca), MIT licence.
+The ideas taken from it are:
+
+- one shared event model (message, tool call, tool result, thinking, compaction) that every
+  harness is read into and written out of, with calls and results linked by id;
+- the native tool-call and thinking shapes it documents for Claude Code, Pi, omp and OpenCode;
+- its conversion rules: pair every tool result with its call, never move signed thinking, count
+  every dropped item, and never modify the source session.
+
+No session-migrate code is included in DoppelClanker; `hsconv` is a separate Rust
+implementation. Research notes are in [docs/research/session-fidelity.md](docs/research/session-fidelity.md).
 
 ## License
 
