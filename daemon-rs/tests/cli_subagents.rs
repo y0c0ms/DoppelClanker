@@ -89,3 +89,31 @@ fn a_claude_session_is_synced_as_a_source() {
     }
     assert_eq!(mirrors, 1, "a Claude session must be mirrored into pi");
 }
+
+#[test]
+fn a_subagent_transcript_is_kept_as_a_verified_archive_under_its_parent() {
+    // The daemon keeps a compressed copy of each subagent transcript under its parent in
+    // the archive store, so the copy survives the original being removed.
+    let sb = sandbox("archive-sub");
+    let dir = sb.join("claude").join("projects").join("-proj");
+    let parent = PARENT;
+    let sub = dir.join(parent).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(sb.join("pi").join("sessions")).unwrap();
+    fs::write(dir.join(format!("{parent}.jsonl")), format!(
+        "{}\n",
+        format!(r#"{{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"{parent}","cwd":"/tmp/proj","timestamp":"2026-10-01T10:00:00.000Z","message":{{"role":"user","content":"{}"}}}}"#, "hello ".repeat(120))
+    )).unwrap();
+    let body: String = (0..400).map(|i| format!("{{\"type\":\"user\",\"uuid\":\"s{i}\",\"sessionId\":\"sub\",\"isSidechain\":true,\"message\":{{\"role\":\"user\",\"content\":\"sub work step {i}\"}}}}\n")).collect();
+    let sub_file = sub.join("agent-a1.jsonl");
+    fs::write(&sub_file, &body).unwrap();
+
+    let o = run(&sb);
+    assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+
+    let archived = sb.join("state").join("archive").join(parent).join("agent-a1.jsonl.hsar");
+    assert!(archived.exists(), "the subagent transcript must be archived under its parent");
+    let back = harness_sync::archive_store::read_session(&archived).expect("archive must verify");
+    assert_eq!(back, body.as_bytes(), "the archived copy must equal the original");
+    assert!(fs::metadata(&archived).unwrap().len() < body.len() as u64 / 3, "and must be compressed");
+}

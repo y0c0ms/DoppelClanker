@@ -162,8 +162,16 @@ fn record_subagents(env: &Env, state: &mut State) {
     {
         found.entry(parent).or_default().push(path.display().to_string());
     }
-    for files in found.values_mut() {
+    let store = env.state_dir.join("archive");
+    for (parent, files) in found.iter_mut() {
         files.sort();
+        // Keep a verified, compressed copy of each subagent transcript under its parent.
+        // A copy that fails to write is logged; it never blocks the pass.
+        for f in files.iter() {
+            if let Err(e) = harness_sync::archive_store::store_session(&store, parent, Path::new(f)) {
+                eprintln!("archive {f}: {e}");
+            }
+        }
     }
     state.subagents = found;
 }
