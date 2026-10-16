@@ -77,10 +77,23 @@ hsconv ids <file.jsonl>        # list session ids in a journal
 
 ## Caveats
 
-- **Platform status.** Developed on Windows and tested on Linux. The Rust daemon has not been run on Windows or macOS yet (see the packaging issues).
+- **Platform status.** CI builds and tests on Linux, macOS and Windows on every pull request. The Windows and macOS login-start paths have only run in CI, not in a real login session yet.
 - **Claude Code sources** are converted by `hsconv` (`from-claude` and `to-claude`). The Python session-migrate dependency is no longer used.
 - **A crashed harness can leave a lock.** Locks record the harness pid and are swept when the daemon starts. Run `hslock sweep` to clear stale locks manually.
 - **Lock failure policy.** If `hslock` is missing, the hooks fail open with a notice. The daemon's divergence guard is the backstop.
+
+## Running the tests safely
+
+`sh build-test.sh` and plain `cargo test` never start a real harness CLI (omp, OpenCode,
+Claude Code) and never open your real session stores; every test uses a temporary sandbox.
+
+Tests that drive real CLIs are opt-in. Run them only on an isolated machine or container,
+with no access to your real session stores or model credentials:
+
+```sh
+HS_E2E=1 sh build-test.sh                         # also run tests that start real CLIs
+HS_E2E=1 HS_REQUIRE_CLAUDE=1 cargo test --manifest-path daemon-rs/Cargo.toml --test claude_resume
+```
 
 ## Acknowledgements
 

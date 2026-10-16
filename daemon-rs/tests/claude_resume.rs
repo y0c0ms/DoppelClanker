@@ -25,6 +25,11 @@ use std::time::{Duration, Instant};
 const CID: &str = "bbbbbbbb-1111-2222-3333-444444444444";
 
 fn find_claude() -> Option<PathBuf> {
+    // Real harness CLIs run only when HS_E2E=1. Plain `cargo test` never starts them,
+    // so a local run cannot touch a live session store or call a model.
+    if std::env::var("HS_E2E").map_or(true, |v| v != "1") {
+        return None;
+    }
     std::env::var_os("PATH").and_then(|p| {
         std::env::split_paths(&p).map(|d| d.join("claude")).find(|c| c.is_file())
     })
@@ -72,7 +77,7 @@ fn claude_resume_picker_shows_the_renamed_title() {
     let require = std::env::var("HS_REQUIRE_CLAUDE").map_or(false, |v| v == "1");
     let Some(claude) = find_claude() else {
         if require {
-            panic!("HS_REQUIRE_CLAUDE=1 but the claude CLI is not on PATH");
+            panic!("HS_REQUIRE_CLAUDE=1 but the claude CLI is not on PATH or HS_E2E=1 is not set");
         }
         eprintln!("SKIPPED claude_resume: claude CLI not installed (set HS_REQUIRE_CLAUDE=1 to fail instead)");
         return;

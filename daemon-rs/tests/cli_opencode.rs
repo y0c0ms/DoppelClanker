@@ -21,6 +21,11 @@ fn sandbox(name: &str) -> PathBuf {
 }
 
 fn have_cli() -> bool {
+    // Real harness CLIs run only when HS_E2E=1. Plain `cargo test` never starts them,
+    // so a local run cannot touch a live session store or call a model.
+    if std::env::var("HS_E2E").map_or(true, |v| v != "1") {
+        return false;
+    }
     std::env::var_os("PATH").map_or(false, |p| std::env::split_paths(&p).any(|d| d.join("opencode").is_file()))
 }
 

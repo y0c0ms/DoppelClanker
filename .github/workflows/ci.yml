@@ -17,6 +17,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: build-test.sh
+        # Hosted runners have no logged-in harness CLIs, so the gated tests find none
+        # and skip; setting HS_E2E keeps the gate explicit if a runner ever has them.
+        env:
+          HS_E2E: "1"
         run: sh build-test.sh
       - name: installer lifecycle (install, run, uninstall)
         run: sh tests/install_package.sh
