@@ -12,6 +12,8 @@ echo "== hsconv: build + tests"
 (cd "$ROOT/hsconv" && cargo test --release --quiet && cargo build --release --quiet)
 echo "== daemon-rs: build + tests"
 (cd "$ROOT/daemon-rs" && cargo build --quiet && cargo test --quiet)
+echo "== team-server: build + tests"
+(cd "$ROOT/team-server" && cargo test --quiet)
 echo "== no python on the build path"
 # Check only command lines: skip comments and echo text. A python3 invocation
 # would start with the command word, not inside a string.
