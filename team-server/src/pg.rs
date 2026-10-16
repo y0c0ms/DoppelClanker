@@ -22,6 +22,27 @@ impl PgStore {
         Ok(PgStore { client: RefCell::new(client), url: url.to_string(), master })
     }
 
+    /// Connect, retrying with a growing wait. A pod that connects in its first seconds can
+    /// be refused while the network policy is still being programmed (kube-router race), so a
+    /// single attempt at startup is not enough. Gives up after `attempts` tries.
+    pub fn connect_with_retry(url: &str, master: [u8; 32], attempts: u32, wait: std::time::Duration)
+        -> Result<PgStore, String>
+    {
+        let mut last = String::from("no attempt made");
+        for n in 0..attempts.max(1) {
+            match PgStore::connect(url, master) {
+                Ok(store) => return Ok(store),
+                Err(e) => {
+                    last = e;
+                    if n + 1 < attempts {
+                        std::thread::sleep(wait * (n + 1));
+                    }
+                }
+            }
+        }
+        Err(last)
+    }
+
     /// Make sure the connection is alive, reconnecting if it was dropped (for example when the
     /// database restarted). A failed reconnect leaves the old client in place, so the next call
     /// tries again rather than panicking.

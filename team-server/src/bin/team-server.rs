@@ -114,7 +114,9 @@ fn main() {
         eprintln!("team-server: master key must be exactly 32 bytes");
         std::process::exit(2);
     });
-    let store = match PgStore::connect(&db, master) {
+    // Retry at startup: the database may not be reachable for the first seconds (network
+    // policy programming). About 1 + 2 + 3 + 4 s of waiting before giving up.
+    let store = match PgStore::connect_with_retry(&db, master, 5, std::time::Duration::from_secs(1)) {
         Ok(s) => s,
         Err(e) => { eprintln!("team-server: database unavailable: {e}"); std::process::exit(1); }
     };
