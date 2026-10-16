@@ -64,3 +64,40 @@ fn claude_sessions_are_found_in_projects() {
     fs::write(proj.join("memo.jsonl"), "").unwrap();
     assert_eq!(claude_sessions(&root), vec![good]);
 }
+
+#[test]
+fn claude_subagent_files_are_found_under_their_parent_session() {
+    // <projects>/<bucket>/<parent-uuid>/subagents/agent-<id>.jsonl belongs to the parent.
+    let root = tmp("claude-sub");
+    let parent = "ec447302-155c-4280-9c34-2b5122fcd4a4";
+    let sub = root.join("projects").join("-proj").join(parent).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    let a = sub.join("agent-a1.jsonl");
+    fs::write(&a, "").unwrap();
+    fs::write(sub.join("notes.txt"), "").unwrap();
+    let found = harness_sync::discovery::claude_subagents(&root);
+    assert_eq!(found, vec![(parent.to_string(), a)]);
+}
+
+#[test]
+fn gemini_subagent_files_are_found_under_their_parent_session() {
+    let root = tmp("gemini-sub2");
+    let parent = "0f3c9a12-1111-4222-8333-444455556666";
+    let sub = root.join("tmp").join("proj").join("chats").join(parent);
+    fs::create_dir_all(&sub).unwrap();
+    let a = sub.join("sub-1.jsonl");
+    fs::write(&a, "").unwrap();
+    assert_eq!(harness_sync::discovery::gemini_subagents(&root), vec![(parent.to_string(), a)]);
+}
+
+#[test]
+fn subagent_files_never_appear_as_main_sessions() {
+    // The main-session lists must not include anything under a subagents folder, so a
+    // subagent run can never become a conversation of its own.
+    let root = tmp("claude-main-excl");
+    let parent = "ec447302-155c-4280-9c34-2b5122fcd4a4";
+    let sub = root.join("projects").join("-proj").join(parent).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("agent-a1.jsonl"), "").unwrap();
+    assert!(claude_sessions(&root).iter().all(|p| !p.to_string_lossy().contains("subagents")));
+}

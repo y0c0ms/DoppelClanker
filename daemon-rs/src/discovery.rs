@@ -68,3 +68,49 @@ pub fn jsonl_sessions(agent_dir: &Path) -> Vec<PathBuf> {
 pub fn claude_sessions(claude_dir: &Path) -> Vec<PathBuf> {
     one_level_down(&claude_dir.join("projects"), |n| parse_claude_name(n).is_some())
 }
+
+/// Claude subagent transcripts: `<projects>/<bucket>/<parent-uuid>/subagents/*.jsonl`.
+/// Returns (parent session id, subagent file). They belong to the parent session.
+pub fn claude_subagents(claude_dir: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(buckets) = fs::read_dir(claude_dir.join("projects")) else { return Vec::new() };
+    let mut out = Vec::new();
+    for b in buckets.flatten().filter(|b| b.path().is_dir()) {
+        let Ok(parents) = fs::read_dir(b.path()) else { continue };
+        for p in parents.flatten().filter(|p| p.path().is_dir()) {
+            let parent = p.file_name().to_string_lossy().into_owned();
+            let sub = p.path().join("subagents");
+            let Ok(files) = fs::read_dir(&sub) else { continue };
+            for f in files.flatten() {
+                let path = f.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_file() && name.ends_with(".jsonl") {
+                    out.push((parent.clone(), path));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Gemini CLI subagent sessions: `<gemini>/tmp/<slug>/chats/<parentSessionId>/*.jsonl`.
+/// Returns (parent session id, subagent file).
+pub fn gemini_subagents(gemini_dir: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(projects) = fs::read_dir(gemini_dir.join("tmp")) else { return Vec::new() };
+    let mut out = Vec::new();
+    for p in projects.flatten().filter(|p| p.path().is_dir()) {
+        let Ok(parents) = fs::read_dir(p.path().join("chats")) else { continue };
+        for par in parents.flatten().filter(|x| x.path().is_dir()) {
+            let parent = par.file_name().to_string_lossy().into_owned();
+            let Ok(files) = fs::read_dir(par.path()) else { continue };
+            for f in files.flatten() {
+                let path = f.path();
+                if path.is_file() && path.extension().map_or(false, |e| e == "jsonl") {
+                    out.push((parent.clone(), path));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
