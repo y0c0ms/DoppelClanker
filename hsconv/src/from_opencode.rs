@@ -31,6 +31,8 @@ pub struct Stats {
     pub skipped_tool_parts: usize,
     pub skipped_reasoning_parts: usize,
     pub reasoning_kept: usize,
+    pub images: usize,
+    pub skipped_file_parts: usize,
     pub tool_calls: usize,
     pub tool_results: usize,
     pub unfinished_tool_parts: usize,
@@ -98,6 +100,20 @@ pub fn to_journal_lines(export: &Value) -> Result<(Vec<String>, Stats), String> 
                     }
                 }
                 Some("step-start") | Some("step-finish") => {}
+                Some("file") => {
+                    // An attachment. An image carried inline as a data: URL is kept; a file
+                    // reference (path, http URL) cannot be carried and is counted.
+                    let mime = p.get("mime").and_then(Value::as_str).unwrap_or("");
+                    let url = p.get("url").and_then(Value::as_str).unwrap_or("");
+                    match url.strip_prefix("data:").and_then(|rest| rest.split_once(";base64,")) {
+                        Some((data_mime, data)) if mime.starts_with("image/") || data_mime.starts_with("image/") => {
+                            let m = if mime.is_empty() { data_mime } else { mime };
+                            content.push(json!({"type": "image", "data": data, "mimeType": m}));
+                            stats.images += 1;
+                        }
+                        _ => stats.skipped_file_parts += 1,
+                    }
+                }
                 Some("tool") if role == "assistant" => {
                     let cid = p.get("callID").and_then(Value::as_str).unwrap_or("");
                     if cid.is_empty() {
@@ -305,6 +321,25 @@ mod tests {
         assert!(r.iter().all(|m| m["message"]["role"] != "toolResult"));
         assert_eq!(stats.tool_calls, 1);
         assert_eq!(stats.unfinished_tool_parts, 1);
+    }
+
+    #[test]
+    fn an_inline_image_attachment_is_kept_and_a_file_reference_is_counted() {
+        let export: Value = serde_json::from_str(r#"{
+          "info": {"id": "ses_img", "directory": "/tmp", "time": {"created": 1}},
+          "messages": [
+            {"info": {"id": "msg_u", "role": "user", "time": {"created": 2}},
+             "parts": [{"type": "text", "text": "what is this"},
+                       {"type": "file", "mime": "image/png", "url": "data:image/png;base64,iVBORw0KGgo="},
+                       {"type": "file", "mime": "text/plain", "url": "file:///home/x/notes.txt"}]}
+          ]
+        }"#).unwrap();
+        let (lines, stats) = to_journal_lines(&export).unwrap();
+        let u: Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(u["message"]["content"][1], json!({"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}));
+        assert!(!lines.join("\n").contains("notes.txt"), "a local file path must not leak into the journal");
+        assert_eq!(stats.images, 1);
+        assert_eq!(stats.skipped_file_parts, 1);
     }
 
     #[test]

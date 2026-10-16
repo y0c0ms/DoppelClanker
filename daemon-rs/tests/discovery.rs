@@ -101,3 +101,29 @@ fn subagent_files_never_appear_as_main_sessions() {
     fs::write(sub.join("agent-a1.jsonl"), "").unwrap();
     assert!(claude_sessions(&root).iter().all(|p| !p.to_string_lossy().contains("subagents")));
 }
+
+#[test]
+fn gemini_session_files_are_found_under_each_project_chats_folder() {
+    // ~/.gemini/tmp/<slug>/chats/session-<ts>-<id>.jsonl is a Gemini session; other files
+    // in the project folder (logs.json, checkpoints) are not.
+    let root = tmp("gemini");
+    let chats = root.join("tmp").join("proj").join("chats");
+    fs::create_dir_all(&chats).unwrap();
+    let good = chats.join("session-2026-10-16T10-00-0f3c9a12.jsonl");
+    fs::write(&good, "").unwrap();
+    fs::write(root.join("tmp").join("proj").join("logs.json"), "[]").unwrap();
+    fs::write(chats.join("notes.txt"), "").unwrap();
+    assert_eq!(harness_sync::discovery::gemini_sessions(&root), vec![good]);
+}
+
+#[test]
+fn a_gemini_subagent_file_is_not_a_main_session() {
+    // Subagent sessions live in chats/<parentSessionId>/<id>.jsonl; they belong to their
+    // parent and are not listed as conversations of their own.
+    let root = tmp("gemini-sub");
+    let chats = root.join("tmp").join("proj").join("chats");
+    let sub = chats.join("0f3c9a12-1111-4222-8333-444455556666");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("agent-1.jsonl"), "").unwrap();
+    assert!(harness_sync::discovery::gemini_sessions(&root).is_empty());
+}

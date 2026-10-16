@@ -15,6 +15,7 @@ mod from_claude;
 mod from_gemini;
 mod from_opencode;
 mod prior_reasoning;
+mod to_gemini;
 mod journal;
 mod opencode;
 
@@ -182,6 +183,45 @@ fn main() {
                     Ok(())
                 })
         }
+        "to-gemini" => (|| -> Result<(), String> {
+            // to-gemini <journal.jsonl> --gemini-dir <~/.gemini> --project <abs path> --slug <slug> [--id UUID]
+            let p = PathBuf::from(args.get(1).unwrap_or_else(|| usage()));
+            let gdir = PathBuf::from(arg(&args, "--gemini-dir").unwrap_or_else(|| usage()));
+            let project = arg(&args, "--project").unwrap_or_else(|| usage());
+            let slug = arg(&args, "--slug").unwrap_or_else(|| usage());
+            let raw = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let mut records: Vec<Value> = Vec::new();
+            let mut header_id = String::new();
+            let mut start = String::new();
+            for (n, line) in raw.lines().enumerate() {
+                let t = line.trim();
+                if t.is_empty() { continue; }
+                let v: Value = serde_json::from_str(t).map_err(|e| format!("{}:{}: {e}", p.display(), n + 1))?;
+                if v.get("type").and_then(Value::as_str) == Some("session") {
+                    header_id = v.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                    start = v.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string();
+                } else {
+                    records.push(v);
+                }
+            }
+            let sid = arg(&args, "--id").unwrap_or(header_id);
+            let (lines, stats) = to_gemini::to_session_lines(&sid, &project, &start, &records)?;
+            let short: String = sid.chars().take(8).collect();
+            let stamp: String = start.chars().take(16).collect::<String>().replace(':', "-");
+            let dir = gdir.join("tmp").join(&slug).join("chats");
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let dst = dir.join(format!("session-{stamp}-{short}.jsonl"));
+            let tmp = dst.with_extension("jsonl.tmp");
+            let mut text = lines.join("\n");
+            text.push('\n');
+            fs::write(&tmp, text).map_err(|e| e.to_string())?;
+            fs::rename(&tmp, &dst).map_err(|e| e.to_string())?;
+            to_gemini::register_project(&gdir, &project, &slug)?;
+            eprintln!("to-gemini: {} message(s), {} tool call(s), {} tool result(s), {} image(s), dropped {}",
+                stats.messages, stats.tool_calls, stats.tool_results, stats.images, stats.dropped_blocks);
+            println!("{}", dst.display());
+            Ok(())
+        })(),
         "ids" => {
             let seed = args.get(1).unwrap_or_else(|| usage());
             println!("opencode {}\nclaude {}", opencode::session_id_for(seed), claude::session_id_for(seed));
