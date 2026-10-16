@@ -12,6 +12,7 @@
 
 mod claude;
 mod from_claude;
+mod from_gemini;
 mod from_opencode;
 mod journal;
 mod opencode;
@@ -63,6 +64,7 @@ fn usage() -> ! {
          hsconv to-opencode <journal> [--out bundle.json] --id SES_ID --title T [--cli-version V] [--no-thinking]\n\
          hsconv from-claude <transcript.jsonl> --out <journal.jsonl>\n\
          hsconv from-opencode <export.json> --out <journal.jsonl>\n\
+         hsconv from-gemini <session.jsonl> --out <journal.jsonl>\n\
          hsconv to-claude <journal> --out-dir <~/.claude/projects> [--id UUID] [--cli-version V]\n\
          hsconv ids <seed>            (prints the deterministic opencode and claude ids)\n\
          Output path is printed on stdout for to-pi/to-omp/to-claude."
@@ -141,6 +143,23 @@ fn main() {
                     fs::write(&out, text).map_err(|e| format!("{out}: {e}"))?;
                     eprintln!("from-claude: {} message(s), {} text block(s), skipped {} tool / {} thinking / {} records",
                         stats.messages, stats.text_blocks, stats.skipped_tool_blocks, stats.skipped_thinking_blocks, stats.skipped_records);
+                    println!("{out}");
+                    Ok(())
+                })
+        }
+        "from-gemini" => {
+            let p = PathBuf::from(args.get(1).unwrap_or_else(|| usage()));
+            let out = arg(&args, "--out").unwrap_or_else(|| usage());
+            fs::read_to_string(&p)
+                .map_err(|e| format!("{}: {e}", p.display()))
+                .and_then(|raw| from_gemini::to_journal_lines(&raw))
+                .and_then(|(lines, stats)| {
+                    let mut text = lines.join("\n");
+                    text.push('\n');
+                    fs::write(&out, text).map_err(|e| format!("{out}: {e}"))?;
+                    eprintln!("from-gemini: {} message(s), {} text part(s), {} tool call(s) / {} result(s), skipped {} thought / {} ui / {} bad line(s)",
+                        stats.messages, stats.text_parts, stats.tool_calls, stats.tool_results,
+                        stats.skipped_thoughts, stats.skipped_ui_messages, stats.bad_lines);
                     println!("{out}");
                     Ok(())
                 })
