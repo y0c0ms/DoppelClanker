@@ -142,8 +142,11 @@ mod tests {
     use super::*;
 
     fn journal_of(lines: &[String]) -> Journal {
-        let path = std::env::temp_dir().join(format!("hs-claude-rt-{}-{}.jsonl", std::process::id(),
-            lines.len()));
+        // Unique per call: tests run in parallel, and a shared name let one test read
+        // another's half-written file.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("hs-claude-rt-{}-{n}.jsonl", std::process::id()));
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         let j = Journal::read(&path).unwrap();
         let _ = std::fs::remove_file(&path);

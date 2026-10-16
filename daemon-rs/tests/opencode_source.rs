@@ -84,3 +84,35 @@ fn the_database_is_opened_read_only() {
     // change the store. This pins the mode=ro open, not just the queries.
     assert!(harness_sync::opencode::write_probe(&db).is_err(), "the reader's connection must be read-only");
 }
+
+/// A store whose session table has a parent_id column, as real OpenCode stores do:
+/// one root session and one child session that a subagent created under it.
+fn make_db_with_child(path: &PathBuf) {
+    let c = Connection::open(path).unwrap();
+    c.execute_batch(
+        "create table session (id text primary key, parent_id text, directory text, title text,
+            time_updated integer, time_archived integer);
+         insert into session values ('ses_root', null, '/proj', 'Root task', 1792083252020, null);
+         insert into session values ('ses_child', 'ses_root', '/proj', 'Subagent run', 1792083252020, null);",
+    ).unwrap();
+}
+
+#[test]
+fn a_subagent_child_session_is_not_listed_as_its_own_conversation() {
+    // A subagent run is part of its parent; mirroring it separately would put an
+    // unrelated conversation in every other harness's list.
+    let sb = sandbox("child");
+    let db = sb.join("opencode.db");
+    make_db_with_child(&db);
+    let ids: Vec<String> = sessions(&db).into_iter().map(|s| s.id).collect();
+    assert_eq!(ids, vec!["ses_root".to_string()], "only the root session is a source");
+}
+
+#[test]
+fn a_store_without_a_parent_column_still_lists_its_sessions() {
+    // Older stores have no parent_id column; reading them must not fail.
+    let sb = sandbox("noparentcol");
+    let db = sb.join("opencode.db");
+    make_db(&db);
+    assert!(sessions(&db).iter().any(|s| s.id == "ses_live"));
+}
