@@ -68,3 +68,25 @@ pub fn jsonl_sessions(agent_dir: &Path) -> Vec<PathBuf> {
 pub fn claude_sessions(claude_dir: &Path) -> Vec<PathBuf> {
     one_level_down(&claude_dir.join("projects"), |n| parse_claude_name(n).is_some())
 }
+
+/// Gemini CLI main sessions: `<gemini>/tmp/<slug>/chats/session-*.jsonl`, one directory
+/// below each project's `chats` folder. Subagent sessions sit in `chats/<parentId>/` and
+/// are not main sessions, so they are not returned.
+pub fn gemini_sessions(gemini_dir: &Path) -> Vec<PathBuf> {
+    let root = gemini_dir.join("tmp");
+    let Ok(projects) = fs::read_dir(&root) else { return Vec::new() };
+    let mut out = Vec::new();
+    for p in projects.flatten().filter(|p| p.path().is_dir()) {
+        let chats = p.path().join("chats");
+        let Ok(files) = fs::read_dir(&chats) else { continue };
+        for f in files.flatten() {
+            let path = f.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_file() && name.starts_with("session-") && name.ends_with(".jsonl") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}

@@ -31,6 +31,8 @@ pub struct Stats {
     pub skipped_tool_blocks: usize,
     pub skipped_thinking_blocks: usize,
     pub thinking_kept: usize,
+    pub images: usize,
+    pub skipped_image_blocks: usize,
     pub skipped_records: usize,
     pub tool_calls: usize,
     pub tool_results: usize,
@@ -129,6 +131,18 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
                             }
                         }
                         Some("redacted_thinking") => stats.skipped_thinking_blocks += 1,
+                        Some("image") => {
+                            let src = b.get("source").and_then(Value::as_object);
+                            let kind = src.and_then(|x| x.get("type")).and_then(Value::as_str).unwrap_or("");
+                            let data = src.and_then(|x| x.get("data")).and_then(Value::as_str).unwrap_or("");
+                            let mime = src.and_then(|x| x.get("media_type")).and_then(Value::as_str).unwrap_or("image/png");
+                            if kind == "base64" && !data.is_empty() {
+                                content.push(json!({"type": "image", "data": data, "mimeType": mime}));
+                                stats.images += 1;
+                            } else {
+                                stats.skipped_image_blocks += 1;
+                            }
+                        }
                         Some("tool_use") if role == "assistant" => {
                             let id = b.get("id").and_then(Value::as_str).unwrap_or("").to_string();
                             let name = b.get("name").and_then(Value::as_str).unwrap_or("unknown_tool").to_string();
@@ -435,6 +449,31 @@ mod tests {
         assert!(first.starts_with("<prior_reasoning harness=\"claude\" model=\"claude-opus-4\">"), "{first}");
         assert!(!all.contains("SIG-SECRET"), "signature must never be copied");
         assert_eq!(stats.thinking_kept, 1);
+    }
+
+    #[test]
+    fn a_base64_image_in_a_user_turn_is_kept_as_an_image_block() {
+        // Claude stores a pasted image as a base64 source; it must reach the journal.
+        let raw = concat!(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","message":{"role":"user","content":[{"type":"text","text":"what is this"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}}"#, "\n",
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s","message":{"role":"assistant","content":[{"type":"text","text":"A logo."}]}}"#, "\n",
+        );
+        let (lines, stats) = to_journal_lines(raw).unwrap();
+        let r: Vec<Value> = lines.iter().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(r[0]["message"]["content"][1], json!({"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}));
+        assert_eq!(stats.images, 1);
+    }
+
+    #[test]
+    fn an_image_url_source_is_counted_not_invented() {
+        // A URL reference cannot be carried without fetching it; it is counted and skipped.
+        let raw = concat!(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","message":{"role":"user","content":[{"type":"text","text":"see"},{"type":"image","source":{"type":"url","url":"https://example.com/x.png"}}]}}"#, "\n",
+        );
+        let (lines, stats) = to_journal_lines(raw).unwrap();
+        assert!(!lines.join("\n").contains("example.com"));
+        assert_eq!(stats.images, 0);
+        assert_eq!(stats.skipped_image_blocks, 1);
     }
 
     #[test]
