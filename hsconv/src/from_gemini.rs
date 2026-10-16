@@ -52,6 +52,7 @@ pub struct Stats {
     pub orphan_tool_results: usize,
     pub duplicate_tool_results: usize,
     pub skipped_thoughts: usize,
+    pub thoughts_kept: usize,
     pub skipped_ui_messages: usize,
     pub skipped_file_parts: usize,
     pub skipped_parts: usize,
@@ -280,6 +281,7 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
         }
         let parts = parts_of(m.get("content"));
         let mut content: Vec<Value> = Vec::new();
+        let model = m.get("model").and_then(Value::as_str).unwrap_or("gemini").to_string();
 
         if kind == "user" {
             let responses: Vec<&Value> = parts.iter().filter_map(|p| p.get("functionResponse")).collect();
@@ -305,7 +307,7 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
                     results.push(tool_result(&cid, &name, text, is_error));
                     stats.tool_results += 1;
                 } else {
-                    common_part(p, &mut content, &mut stats);
+                    common_part(p, "unknown", &mut content, &mut stats);
                 }
             }
             if !content.is_empty() {
@@ -324,7 +326,7 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
                 if let Some(fc) = p.get("functionCall") {
                     push_call(fc, &mut content, &mut calls, &mut stats);
                 } else {
-                    common_part(p, &mut content, &mut stats);
+                    common_part(p, &model, &mut content, &mut stats);
                 }
             }
             let mut legacy_pending: Pending = Vec::new();
@@ -394,10 +396,18 @@ fn push_call(fc: &Value, content: &mut Vec<Value>, calls: &mut HashMap<String, S
     true
 }
 
-/// Parts shared by both roles: text, thought, inlineData, fileData.
-fn common_part(p: &Value, content: &mut Vec<Value>, stats: &mut Stats) {
+/// Parts shared by both roles: text, thought, inlineData, fileData. A thought part keeps
+/// its words as a `<prior_reasoning>` marker; its signature is never copied.
+fn common_part(p: &Value, model: &str, content: &mut Vec<Value>, stats: &mut Stats) {
     if p.get("thought").and_then(Value::as_bool) == Some(true) {
-        stats.skipped_thoughts += 1;
+        let t = p.get("text").and_then(Value::as_str).unwrap_or("");
+        match crate::prior_reasoning::wrap(t, "gemini", model) {
+            Some(w) => {
+                content.push(json!({"type": "text", "text": w}));
+                stats.thoughts_kept += 1;
+            }
+            None => stats.skipped_thoughts += 1,
+        }
     } else if let Some(s) = p.get("text").and_then(Value::as_str) {
         if !s.trim().is_empty() {
             content.push(json!({"type": "text", "text": s}));
@@ -582,13 +592,15 @@ mod tests {
     fn thoughts_are_dropped_and_signatures_never_copied() {
         let g = r#"{"id":"g1","timestamp":"2026-10-01T10:00:02.000Z","type":"gemini","content":[{"text":"pondering","thought":true,"thoughtSignature":"SIG-XYZ"},{"text":"answer"},{"functionCall":{"id":"c","name":"t","args":{}},"thoughtSignature":"SIG-ABC"}]}"#;
         let (lines, stats) = to_journal_lines(&session(&[U1, g])).unwrap();
-        assert_eq!(stats.skipped_thoughts, 1);
+        assert_eq!(stats.thoughts_kept, 1);
         let all = lines.join("\n");
         assert!(!all.contains("SIG-"), "thoughtSignature leaked: {all}");
         assert!(!all.contains("thoughtSignature"));
-        assert!(!all.contains("pondering"));
+        assert!(all.contains("pondering"), "thought words are kept as a marker");
+        assert!(all.contains("<prior_reasoning harness=\\\"gemini\\\""));
         let r = recs(&lines);
-        assert_eq!(r[2]["message"]["content"][0]["text"], "answer");
+        assert_eq!(r[2]["message"]["content"][0]["text"].as_str().unwrap().contains("pondering"), true);
+        assert_eq!(r[2]["message"]["content"][1]["text"], "answer");
     }
 
     #[test]

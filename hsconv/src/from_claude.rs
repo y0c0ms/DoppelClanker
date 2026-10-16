@@ -30,6 +30,7 @@ pub struct Stats {
     pub text_blocks: usize,
     pub skipped_tool_blocks: usize,
     pub skipped_thinking_blocks: usize,
+    pub thinking_kept: usize,
     pub skipped_records: usize,
     pub tool_calls: usize,
     pub tool_results: usize,
@@ -116,7 +117,18 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
                                 stats.text_blocks += 1;
                             }
                         }
-                        Some("thinking") | Some("redacted_thinking") => stats.skipped_thinking_blocks += 1,
+                        Some("thinking") => {
+                            let t = b.get("thinking").and_then(Value::as_str).unwrap_or("");
+                            // The signature is never copied; the words are kept as marked text.
+                            match crate::prior_reasoning::wrap(t, "claude", &model_of(&msg)) {
+                                Some(w) => {
+                                    content.push(json!({"type": "text", "text": w}));
+                                    stats.thinking_kept += 1;
+                                }
+                                None => stats.skipped_thinking_blocks += 1,
+                            }
+                        }
+                        Some("redacted_thinking") => stats.skipped_thinking_blocks += 1,
                         Some("tool_use") if role == "assistant" => {
                             let id = b.get("id").and_then(Value::as_str).unwrap_or("").to_string();
                             let name = b.get("name").and_then(Value::as_str).unwrap_or("unknown_tool").to_string();
@@ -274,10 +286,16 @@ pub fn to_journal_lines(raw: &str) -> Result<(Vec<String>, Stats), String> {
     Ok((lines, stats))
 }
 
+/// The model that wrote a Claude assistant message, from its message.model field.
+fn model_of(msg: &Map<String, Value>) -> String {
+    msg.get("model").and_then(Value::as_str).unwrap_or("unknown").to_string()
+}
+
 /// Claude wraps local commands and reminders in <tags>; those are not turns.
 fn is_real_text(s: &str) -> bool {
     let t = s.trim();
-    !t.is_empty() && !t.starts_with('<')
+    // A <prior_reasoning> marker is conversation (earlier reasoning), not a wrapper tag.
+    crate::prior_reasoning::is_wrapped(t) || (!t.is_empty() && !t.starts_with('<'))
 }
 
 #[cfg(test)]
@@ -297,7 +315,9 @@ mod tests {
         assert_eq!(lines.len(), 4, "header + 3 messages");
         let a: Value = serde_json::from_str(&lines[2]).unwrap();
         assert_eq!(a["parentId"], "u1");
-        assert_eq!(a["message"]["content"][0]["text"], "hi there");
+        // The thinking marker comes first, then the answer.
+        assert!(a["message"]["content"][0]["text"].as_str().unwrap().starts_with("<prior_reasoning"));
+        assert_eq!(a["message"]["content"][1]["text"], "hi there");
         assert_eq!(stats.messages, 3);
     }
 
@@ -401,9 +421,30 @@ mod tests {
     }
 
     #[test]
-    fn thinking_is_dropped_never_carried() {
-        let (lines, stats) = to_journal_lines(T).unwrap();
-        assert!(!lines.join("\n").contains("hm"), "thinking leaked into the journal");
+    fn thinking_is_kept_as_a_marker_and_its_signature_is_never_copied() {
+        let raw = concat!(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","message":{"role":"user","content":"why"}}"#, "\n",
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s","message":{"role":"assistant","model":"claude-opus-4","content":[{"type":"thinking","thinking":"weigh the options","signature":"SIG-SECRET"},{"type":"text","text":"Because."}]}}"#, "\n",
+        );
+        let (lines, stats) = to_journal_lines(raw).unwrap();
+        let all = lines.join("\n");
+        assert!(all.contains("weigh the options"), "thinking words must be kept");
+        // The journal is JSON, so the marker's quotes are escaped; check the decoded text.
+        let r = records(&lines);
+        let first = r[2]["message"]["content"][0]["text"].as_str().unwrap();
+        assert!(first.starts_with("<prior_reasoning harness=\"claude\" model=\"claude-opus-4\">"), "{first}");
+        assert!(!all.contains("SIG-SECRET"), "signature must never be copied");
+        assert_eq!(stats.thinking_kept, 1);
+    }
+
+    #[test]
+    fn redacted_thinking_has_no_text_and_stays_dropped() {
+        let raw = concat!(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","message":{"role":"user","content":"why"}}"#, "\n",
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s","message":{"role":"assistant","content":[{"type":"redacted_thinking","data":"ENC"},{"type":"text","text":"ok"}]}}"#, "\n",
+        );
+        let (lines, stats) = to_journal_lines(raw).unwrap();
+        assert!(!lines.join("\n").contains("ENC"));
         assert_eq!(stats.skipped_thinking_blocks, 1);
     }
 

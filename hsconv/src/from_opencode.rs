@@ -30,6 +30,7 @@ pub struct Stats {
     pub text_parts: usize,
     pub skipped_tool_parts: usize,
     pub skipped_reasoning_parts: usize,
+    pub reasoning_kept: usize,
     pub tool_calls: usize,
     pub tool_results: usize,
     pub unfinished_tool_parts: usize,
@@ -86,7 +87,16 @@ pub fn to_journal_lines(export: &Value) -> Result<(Vec<String>, Stats), String> 
                         stats.text_parts += 1;
                     }
                 }
-                Some("reasoning") => stats.skipped_reasoning_parts += 1,
+                Some("reasoning") => {
+                    let t = p.get("text").and_then(Value::as_str).unwrap_or("");
+                    match crate::prior_reasoning::wrap(t, "opencode", &model_name(minfo)) {
+                        Some(w) => {
+                            content.push(json!({"type": "text", "text": w}));
+                            stats.reasoning_kept += 1;
+                        }
+                        None => stats.skipped_reasoning_parts += 1,
+                    }
+                }
                 Some("step-start") | Some("step-finish") => {}
                 Some("tool") if role == "assistant" => {
                     let cid = p.get("callID").and_then(Value::as_str).unwrap_or("");
@@ -162,6 +172,11 @@ pub fn to_journal_lines(export: &Value) -> Result<(Vec<String>, Stats), String> 
         return Err("export has no user or assistant text to convert".into());
     }
     Ok((lines, stats))
+}
+
+/// The model named on an OpenCode message, or "unknown".
+fn model_name(minfo: &Map<String, Value>) -> String {
+    minfo.get("modelID").and_then(Value::as_str).unwrap_or("unknown").to_string()
 }
 
 /// O-penCode names an untitled session "New session - <timestamp>". That is
@@ -332,10 +347,14 @@ mod tests {
         assert_eq!(u["message"]["role"], "user");
         assert_eq!(u["message"]["content"][0]["text"], "ping");
         assert_eq!(a["message"]["role"], "assistant");
-        assert_eq!(a["message"]["content"][0]["text"], "pong");
+        // The reasoning comes first as a marker, then the answer.
+        let marker = a["message"]["content"][0]["text"].as_str().unwrap();
+        assert!(marker.starts_with("<prior_reasoning harness=\"opencode\""), "{marker}");
+        assert!(marker.contains("hmm"));
+        assert_eq!(a["message"]["content"][1]["text"], "pong");
         assert_eq!(a["parentId"], u["id"], "answer must link to the prompt");
         assert_eq!(stats.messages, 2);
-        assert_eq!(stats.skipped_reasoning_parts, 1);
+        assert_eq!(stats.reasoning_kept, 1);
     }
 
     #[test]
