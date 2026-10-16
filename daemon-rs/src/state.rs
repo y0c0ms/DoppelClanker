@@ -42,6 +42,9 @@ pub struct State {
     pub sources: HashMap<String, Source>,
     /// Every path or id the daemon created as a mirror. Changes to these are ignored.
     pub mirror_keys: BTreeSet<String>,
+    /// Subagent transcript files, keyed by the parent session id. They belong to the
+    /// parent: shown under it, never synced as conversations of their own.
+    pub subagents: BTreeMap<String, Vec<String>>,
 }
 
 fn invalid(e: impl std::fmt::Display) -> io::Error {
@@ -77,6 +80,13 @@ impl State {
                 st.sources.insert(k.clone(), src);
             }
         }
+        if let Some(subs) = raw.get("subagents").and_then(Value::as_object) {
+            for (parent, files) in subs {
+                let list = files.as_array().map(|a| a.iter().filter_map(Value::as_str)
+                    .map(str::to_string).collect()).unwrap_or_default();
+                st.subagents.insert(parent.clone(), list);
+            }
+        }
         if let Some(keys) = raw.get("mirror_keys").and_then(Value::as_array) {
             st.mirror_keys = keys.iter().filter_map(Value::as_str).map(str::to_string).collect();
         }
@@ -99,6 +109,7 @@ impl State {
         let data = serde_json::json!({
             "sources": sources,
             "mirror_keys": self.mirror_keys.iter().collect::<Vec<_>>(),
+            "subagents": self.subagents,
         });
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, serde_json::to_string_pretty(&data).map_err(invalid)?)?;
