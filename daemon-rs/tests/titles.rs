@@ -34,11 +34,11 @@ fn missing_title_is_empty() {
 fn claude_ai_title_beats_first_prompt() {
     let lines = [
         r#"{"type":"user","isMeta":false,"message":{"role":"user","content":"This session is being continued from a previous conversation"}}"#,
-        r#"{"type":"ai-title","aiTitle":"Configure homelab MCP servers"}"#,
+        r#"{"type":"ai-title","aiTitle":"Configure build pipeline servers"}"#,
         r#"{"type":"user","isMeta":false,"message":{"role":"user","content":"some first prompt"}}"#,
     ];
     let (title, has_user) = claude_title_from_lines(&lines);
-    assert_eq!(title, "Configure homelab MCP servers");
+    assert_eq!(title, "Configure build pipeline servers");
     assert!(has_user);
 }
 

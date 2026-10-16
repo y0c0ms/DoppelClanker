@@ -18,6 +18,8 @@ pub enum Mode {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ev {
     CtrlD,
+    /// Refresh the selected space's sessions from the team server.
+    CtrlR,
     Char(char),
     Backspace,
     Enter,
@@ -30,6 +32,12 @@ pub struct App {
     lock_dir: PathBuf,
     hslock: PathBuf,
     groups: Vec<Group>,
+    /// The space currently shown, if any, and the sessions last fetched for it.
+    space: Option<String>,
+    remote: Vec<crate::remote::SpaceSession>,
+    /// Session ids already seen in an earlier refresh, so only new ones are reported.
+    seen: std::collections::HashSet<String>,
+    new_ids: Vec<String>,
     model: Model,
     mode: Mode,
     input: String,
@@ -44,6 +52,10 @@ impl App {
         App {
             model: Model::new(titles),
             roots, state, lock_dir, hslock, groups,
+            space: None,
+            remote: Vec::new(),
+            seen: std::collections::HashSet::new(),
+            new_ids: Vec::new(),
             mode: Mode::Browse,
             input: String::new(),
             status: String::new(),
@@ -65,6 +77,50 @@ impl App {
 
     pub fn rows(&self) -> &[Group] {
         &self.groups
+    }
+
+    /// Choose the space whose sessions Ctrl+R refreshes.
+    pub fn select_space(&mut self, space: &str) {
+        self.space = Some(space.to_string());
+    }
+
+    pub fn set_status(&mut self, msg: &str) {
+        self.status = msg.to_string();
+    }
+
+    /// Sessions fetched from the server for the selected space, in server order.
+    pub fn remote_rows(&self) -> &[crate::remote::SpaceSession] {
+        &self.remote
+    }
+
+    /// Session ids that appeared since the previous refresh.
+    pub fn new_remote_ids(&self) -> Vec<String> {
+        self.new_ids.clone()
+    }
+
+    /// Ask the server for the selected space's sessions. On success the list is replaced and
+    /// the sessions not seen before are recorded. On failure the last good list is kept.
+    pub fn refresh_space(&mut self, remote: &dyn crate::remote::RemoteSessions, _now: Instant) {
+        let Some(space) = self.space.clone() else {
+            self.status = "no space selected".into();
+            return;
+        };
+        match remote.list(&space) {
+            Ok(sessions) => {
+                self.new_ids = sessions.iter()
+                    .filter(|s| !self.seen.contains(&s.id))
+                    .map(|s| s.id.clone())
+                    .collect();
+                for s in &sessions {
+                    self.seen.insert(s.id.clone());
+                }
+                self.status = format!("{} new session(s) in '{space}'", self.new_ids.len());
+                self.remote = sessions;
+            }
+            Err(_) => {
+                self.status = format!("server unreachable; showing last list for '{space}'");
+            }
+        }
     }
 
     pub fn input(&self) -> &str {
@@ -89,6 +145,9 @@ impl App {
 
     fn handle_browse(&mut self, ev: Ev, now: Instant) {
         match ev {
+            // Refresh needs the server client, which the caller supplies through
+            // `refresh_space`. The key is accepted here so it is never mistaken for rename.
+            Ev::CtrlR => {}
             Ev::CtrlD => {
                 let Some(g) = self.selected() else {
                     self.status = "nothing selected".into();

@@ -2,6 +2,7 @@
 name = "harness-sync"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "harness-sync daemon (Rust port of daemon/harness_sync.py)."
 
 [dependencies]
@@ -13,6 +14,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 crossterm = "0.29"
 sha2 = "0.10"
 zstd = "0.13"
+ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
 proptest = "1"

@@ -487,6 +487,16 @@ fn main() {
 
 /// Interactive manage screen. Raw mode and the alternate screen are restored on
 /// every exit path, including a panic, so the terminal is never left unusable.
+/// Ctrl+R: fetch the selected space's sessions from the team server. The server is configured
+/// by environment variables (see remote_http); without them the refresh says so, nothing else.
+fn refresh_remote(app: &mut harness_sync::app::App) {
+    use harness_sync::remote_http::HttpRemote;
+    match HttpRemote::from_env() {
+        Some(remote) => app.refresh_space(&remote, std::time::Instant::now()),
+        None => app.set_status("team server not configured: set HS_TEAM_URL, HS_TEAM_TOKEN, HS_TEAM_MACHINE"),
+    }
+}
+
 fn run_tui(roots: harness_sync::manage::Roots, state: State, lock_dir: PathBuf, hslock: PathBuf) -> std::io::Result<()> {
     use crossterm::event::{self, Event, KeyCode, KeyModifiers};
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -520,12 +530,17 @@ fn run_tui(roots: harness_sync::manage::Roots, state: State, lock_dir: PathBuf, 
         }
         let ev = match (key.code, key.modifiers) {
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => Ev::CtrlD,
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => Ev::CtrlR,
             (KeyCode::Char(c), _) => Ev::Char(c),
             (KeyCode::Backspace, _) => Ev::Backspace,
             (KeyCode::Enter, _) => Ev::Enter,
             (KeyCode::Esc, _) => Ev::Esc,
             _ => continue,
         };
+        if ev == Ev::CtrlR {
+            refresh_remote(&mut app);
+            continue;
+        }
         app.handle(ev, Instant::now());
         if app.should_quit() {
             return Ok(());
