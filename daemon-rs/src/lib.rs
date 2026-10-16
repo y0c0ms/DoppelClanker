@@ -9,6 +9,7 @@ pub mod lock;
 pub mod manage;
 pub mod mirror;
 pub mod opencode;
+pub mod opencode_rename;
 pub mod pass;
 pub mod scan;
 pub mod state;
