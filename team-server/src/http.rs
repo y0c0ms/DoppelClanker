@@ -19,6 +19,7 @@ pub struct LeaseBody { pub space: String, pub conversation: String, pub machine:
 /// content.
 pub fn error_response(e: &ServiceError) -> (u16, Value) {
     match e {
+        ServiceError::Unavailable => (503, json!({"error": "service unavailable, retry later"})),
         ServiceError::NoSpace(_) => (404, json!({"error": "no such space"})),
         ServiceError::NotMember(_) => (403, json!({"error": "not a member"})),
         ServiceError::Auth(_) => (401, json!({"error": "authentication refused"})),
@@ -93,5 +94,35 @@ pub fn release<S: Store>(svc: &mut Service<S>, auth: Option<&str>, body: &LeaseB
     match svc.release(&body.space, &body.conversation, &body.machine) {
         Ok(()) => (200, json!({"released": true})),
         Err(e) => error_response(&e),
+    }
+}
+
+/// Store a session under the caller's live lease. The caller must hold a token for its machine.
+pub fn write_record<S: Store>(svc: &mut Service<S>, auth: Option<&str>, space: &str, conv: &str,
+                              machine: &str, version: u64, plain: Vec<u8>, now: u64) -> (u16, Value)
+{
+    if let Err(r) = require_token(svc, space, auth, machine, now) {
+        return r;
+    }
+    match svc.put_record(space, conv, machine, version, plain, now) {
+        Ok(()) => (200, json!({"stored": true})),
+        Err(e) => error_response(&e),
+    }
+}
+
+/// Read a session. Returns the plaintext on success, or (status, error body).
+pub fn read_record<S: Store>(svc: &Service<S>, auth: Option<&str>, space: &str, conv: &str,
+                             machine: &str, now: u64) -> (u16, Result<Vec<u8>, Value>)
+{
+    let member = match require_token(svc, space, auth, machine, now) {
+        Ok(m) => m,
+        Err((status, body)) => return (status, Err(body)),
+    };
+    match svc.get_record(space, conv, &member) {
+        Ok(plain) => (200, Ok(plain)),
+        Err(e) => {
+            let (status, body) = error_response(&e);
+            (status, Err(body))
+        }
     }
 }

@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServiceError {
+    /// The store could not answer. Not a judgement on the request: retry later.
+    Unavailable,
     NoSpace(String),
     NotMember(String),
     Auth(String),
@@ -145,6 +147,7 @@ impl<S: Store> Service<S> {
 
     /// A machine joins a space with the authenticator code for `now`.
     pub fn join(&mut self, space: &str, who: &str, machine: &str, code: &str, now: u64) -> Result<(), ServiceError> {
+        self.check_store()?;
         self.member(space, who)?;
         let secret = self.space_secret(space).ok_or_else(|| ServiceError::NoSpace(space.into()))?;
         // Remember which member this machine joined as. Stored, so it survives a restart.
@@ -167,12 +170,14 @@ impl<S: Store> Service<S> {
 
     /// Check a token from a machine and return the member it was issued to.
     pub fn authenticate(&self, space: &str, token: &str, machine: &str, now: u64) -> Result<String, ServiceError> {
+        self.check_store()?;
         let key = self.store.load_token_key(space).ok_or_else(|| ServiceError::NoSpace(space.into()))?;
         crate::auth::check_token(&key, token, machine, now)
             .map_err(|e| ServiceError::Auth(format!("{e:?}")))
     }
 
     pub fn acquire(&mut self, space: &str, conv: &str, machine: &str, now: u64) -> Result<Lease, ServiceError> {
+        self.check_store()?;
         self.store.load_space(space).ok_or_else(|| ServiceError::NoSpace(space.into()))?;
         Ok(self.leases.acquire(&format!("{space}/{conv}"), machine, now)?)
     }
@@ -198,10 +203,17 @@ impl<S: Store> Service<S> {
     }
 
     pub fn get_record(&self, space: &str, conv: &str, who: &str) -> Result<Vec<u8>, ServiceError> {
+        self.check_store()?;
         self.member(space, who)?;
         let sealed = self.store.record(space, conv).ok_or_else(|| ServiceError::NoSpace(conv.into()))?;
         let s = self.store.load_space(space).ok_or_else(|| ServiceError::NoSpace(space.into()))?;
         Ok(s.open_for(who, &sealed)?)
+    }
+
+    /// Refuse with Unavailable when the store cannot answer, so an outage is never mistaken
+    /// for a missing space or a refused code.
+    fn check_store(&self) -> Result<(), ServiceError> {
+        if self.store.ping() { Ok(()) } else { Err(ServiceError::Unavailable) }
     }
 
     /// Whether the store is reachable. The health check reports this, nothing else.
@@ -211,6 +223,7 @@ impl<S: Store> Service<S> {
 
     /// The conversation ids in a space. Only a member may list them.
     pub fn list_conversations(&self, space: &str, who: &str) -> Result<Vec<String>, ServiceError> {
+        self.check_store()?;
         self.member(space, who)?;
         Ok(self.store.list_conversations(space))
     }
