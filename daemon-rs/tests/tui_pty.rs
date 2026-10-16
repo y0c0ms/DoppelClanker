@@ -38,6 +38,8 @@ fn tui_draws_the_session_and_quits_on_q() {
         .env("OMP_AGENT_DIR", sb.join("omp"))
         .env("PI_AGENT_DIR", sb.join("pi"))
         .env("CLAUDE_CONFIG_DIR", sb.join("claude"))
+        // Point O-penCode at an empty sandbox path so the TUI never lists the real store.
+        .env("OPENCODE_DB", sb.join("no-opencode").join("opencode.db"))
         .env("HSLOCK", sb.join("no-hslock"))
         .env("TERM", "xterm-256color")
         .stdin(unsafe_stdio(slave))
