@@ -14,6 +14,7 @@ mod claude;
 mod from_claude;
 mod from_gemini;
 mod from_opencode;
+mod prior_reasoning;
 mod journal;
 mod opencode;
 

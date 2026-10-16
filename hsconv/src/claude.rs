@@ -87,13 +87,22 @@ pub fn to_lines(j: &Journal, o: &Options) -> Vec<String> {
                                 blocks.push(json!({"type": "text", "text": t}));
                             }
                         }
+                        // Thinking from another model is carried as marked text, never as a
+                        // thinking block (Claude signs its own and rejects foreign ones).
+                        Some("thinking") => {
+                            let t = ob.get("thinking").and_then(Value::as_str).unwrap_or("");
+                            let model = m.message.get("model").and_then(Value::as_str).unwrap_or("unknown");
+                            if let Some(w) = crate::prior_reasoning::wrap(t, "omp", &model) {
+                                blocks.push(json!({"type": "text", "text": w}));
+                            }
+                        }
                         Some("toolCall") => blocks.push(json!({
                             "type": "tool_use",
                             "id": ob.get("id").cloned().unwrap_or(Value::String("call".into())),
                             "name": ob.get("name").cloned().unwrap_or(Value::String("tool".into())),
                             "input": ob.get("arguments").cloned().unwrap_or(Value::Object(Map::new()))
                         })),
-                        _ => {} // thinking dropped by design
+                        _ => {}
                     }
                 }
                 if blocks.is_empty() {
@@ -247,6 +256,29 @@ mod tests {
         let res = blocks.iter().position(|b| b["type"] == "tool_result" && b["tool_use_id"] == "call_1").expect("result");
         assert!(call < res, "the result must come after its call");
         assert_eq!(blocks[res]["content"], "a.txt");
+    }
+
+    #[test]
+    fn thinking_survives_a_round_trip_as_one_marker() {
+        // omp -> Claude -> journal must keep exactly one <prior_reasoning> marker: the
+        // writer carries text blocks through, and the reader must not wrap them again.
+        let journal_src = r#"{"type":"session","version":3,"id":"s","timestamp":"2026-10-01T10:00:00.000Z","cwd":"/tmp/c"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-10-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"why"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-10-01T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"weigh it","thinkingSignature":"OMP-SIG"},{"type":"text","text":"Because."}]}}
+"#;
+        let path = std::env::temp_dir().join(format!("hs-rt-marker-{}.jsonl", std::process::id()));
+        std::fs::write(&path, journal_src).unwrap();
+        let j1 = journal_of(&[journal_src.lines().map(str::to_string).collect::<Vec<_>>().join("\n")]);
+        let _ = std::fs::remove_file(&path);
+        let claude_lines = to_lines(&j1, &Options { session_id: "s4", cwd: "/tmp/c", cli_version: "2.1.245" });
+        let claude_text = claude_lines.join("\n");
+        assert!(!claude_text.contains("OMP-SIG"), "omp signature must never reach Claude");
+        assert!(claude_text.contains("weigh it"), "thinking words must reach Claude as text");
+        // Read the Claude output back in: the marker must not be wrapped a second time.
+        let (back, _) = crate::from_claude::to_journal_lines(&claude_text).unwrap();
+        let back_text = back.join("\n");
+        assert_eq!(back_text.matches("<prior_reasoning").count(), 1, "one marker after the round trip: {back_text}");
+        assert!(!back_text.contains("<prior_reasoning harness=\\\"claude\\\" model=\\\"unknown\\\"><prior_reasoning"));
     }
 
     #[test]
