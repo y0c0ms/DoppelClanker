@@ -201,6 +201,32 @@ mod tests {
     }
 
     #[test]
+    fn an_opencode_tool_call_reaches_claude_paired_with_its_result() {
+        let export: Value = serde_json::from_str(r#"{
+          "info": {"id": "ses_x", "directory": "/tmp/p", "time": {"created": 1792000000000}},
+          "messages": [
+            {"info": {"id": "msg_u", "role": "user", "time": {"created": 1792000000001}},
+             "parts": [{"type": "text", "text": "run ls"}]},
+            {"info": {"id": "msg_a", "role": "assistant", "time": {"created": 1792000000002}},
+             "parts": [{"type": "tool", "callID": "call_1", "tool": "bash",
+                        "state": {"status": "completed", "input": {"command": "ls"}, "output": "a.txt"}}]},
+            {"info": {"id": "msg_b", "role": "assistant", "time": {"created": 1792000000003}},
+             "parts": [{"type": "text", "text": "done"}]}
+          ]
+        }"#).unwrap();
+        let (lines, _) = crate::from_opencode::to_journal_lines(&export).unwrap();
+        let out = to_lines(&journal_of(&lines), &Options { session_id: "s3", cwd: "/tmp/p", cli_version: "2.1.245" });
+        let blocks: Vec<Value> = out.iter()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .flat_map(|r| r["message"]["content"].as_array().cloned().unwrap_or_default())
+            .collect();
+        let call = blocks.iter().position(|b| b["type"] == "tool_use" && b["id"] == "call_1").expect("call");
+        let res = blocks.iter().position(|b| b["type"] == "tool_result" && b["tool_use_id"] == "call_1").expect("result");
+        assert!(call < res, "the result must come after its call");
+        assert_eq!(blocks[res]["content"], "a.txt");
+    }
+
+    #[test]
     fn the_parent_chain_is_unbroken() {
         let (lines, _) = crate::from_claude::to_journal_lines(TOOLS).unwrap();
         let out = to_lines(&journal_of(&lines), &Options { session_id: "s2", cwd: "/tmp/c", cli_version: "2.1.245" });
