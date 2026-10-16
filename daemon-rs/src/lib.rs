@@ -1,5 +1,6 @@
 //! harness-sync daemon, Rust port. See daemon/harness_sync.py for the Python original.
 pub mod app;
+pub mod archive;
 pub mod claude_source;
 pub mod discovery;
 pub mod divergence;
