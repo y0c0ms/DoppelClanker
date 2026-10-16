@@ -2,6 +2,7 @@
 name = "hslock"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Conversation lock for harness-sync: one harness writes a conversation at a time."
 
 [dependencies]
