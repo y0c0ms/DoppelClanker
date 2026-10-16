@@ -47,6 +47,7 @@ fn omp_journal(dir: &PathBuf) -> PathBuf {
 
 #[test]
 fn a_mirror_is_imported_into_the_sandbox_store_and_listed() {
+    let _exec = exec_guard();
     let Some(cli) = opencode_cli() else { eprintln!("skipped: opencode CLI not installed"); return; };
     let sb = sandbox("import");
     let src = omp_journal(&sb);
@@ -63,30 +64,43 @@ fn a_mirror_is_imported_into_the_sandbox_store_and_listed() {
 
 #[test]
 fn a_failed_import_is_an_error() {
+    let _exec = exec_guard();
     let sb = sandbox("failimport");
     let src = omp_journal(&sb);
     let fake = sb.join("fake-opencode");
     fs::write(&fake, "#!/bin/sh\nif [ \"$1\" = import ]; then echo 'bad bundle' >&2; exit 4; fi\nexit 0\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    stage_exec(&fake);
     let r = install_opencode(&fake, &hsconv(), &src, "/tmp", "ses_failimport00000000000000000", "t", &sb.join("xdg-env"));
     assert!(r.is_err(), "a failed import must surface as an error");
 }
 
 #[test]
 fn an_import_that_does_not_say_imported_is_an_error() {
+    let _exec = exec_guard();
     // The Python daemon requires the 'Imported session' line. Exit 0 with other output
     // is not a successful import.
     let sb = sandbox("noline");
     let src = omp_journal(&sb);
     let fake = sb.join("quiet-opencode");
     fs::write(&fake, "#!/bin/sh\necho 'something else'\nexit 0\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    stage_exec(&fake);
     let r = install_opencode(&fake, &hsconv(), &src, "/tmp", "ses_noline0000000000000000000", "t", &sb.join("xdg-env"));
     assert!(r.is_err(), "no 'Imported session' line means the import is not confirmed");
+}
+
+/// Make a fake CLI executable. Callers hold exec_guard(), so no fork races the write.
+#[allow(dead_code)]
+fn stage_exec(p: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Writing an executable while another test thread forks can make that exec fail with
+/// "Text file busy" (ETXTBSY): the forked child briefly inherits the open write handle.
+/// Every test in this file that writes a fake CLI or runs one holds this lock, so no
+/// fork happens while a script is open for writing.
+#[allow(dead_code)]
+fn exec_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
