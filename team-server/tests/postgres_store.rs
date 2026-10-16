@@ -12,6 +12,14 @@ fn url() -> Option<String> {
     std::env::var("TEAM_TEST_PG").ok()
 }
 
+/// CI sets TEAM_REQUIRE_PG=1, so a missing database is a failure there, never a silent pass.
+fn skip_or_fail(reason: &str) {
+    if std::env::var("TEAM_REQUIRE_PG").is_ok() {
+        panic!("TEAM_REQUIRE_PG is set but the Postgres tests cannot run: {reason}");
+    }
+    eprintln!("skipped: {reason}");
+}
+
 /// A service on a freshly reset schema. Each test gets its own schema, named after the test,
 /// so tests can run in parallel without dropping each other's tables.
 fn fresh(url: &str, schema: &str) -> Service<PgStore> {
@@ -35,7 +43,7 @@ fn make_schema(url: &str, schema: &str) {
 #[test]
 fn the_postgres_store_matches_the_service_rules_and_holds_ciphertext() {
     let Some(url) = url() else {
-        eprintln!("skipped: set TEAM_TEST_PG to a throwaway Postgres URL");
+        skip_or_fail("set TEAM_TEST_PG to a throwaway Postgres URL");
         return;
     };
     make_schema(&url, "t_pg_rules");
@@ -54,7 +62,7 @@ fn the_postgres_store_matches_the_service_rules_and_holds_ciphertext() {
 
 #[test]
 fn owners_and_the_token_key_survive_a_restart_on_postgres() {
-    let Some(url) = url() else { return };
+    let Some(url) = url() else { skip_or_fail("TEAM_TEST_PG unset"); return };
     make_schema(&url, "t_restart");
     let mut s = fresh(&url, "t_restart");
     s.create_space("team-restart", &["alice"]).unwrap();
@@ -69,7 +77,7 @@ fn owners_and_the_token_key_survive_a_restart_on_postgres() {
 
 #[test]
 fn a_wrong_master_key_cannot_read_stored_records() {
-    let Some(url) = url() else { return };
+    let Some(url) = url() else { skip_or_fail("TEAM_TEST_PG unset"); return };
     make_schema(&url, "t_key");
     let mut s = fresh(&url, "t_key");
     s.create_space("team-key", &["alice"]).unwrap();
