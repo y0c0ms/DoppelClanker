@@ -21,12 +21,22 @@ fn open_ro(db: &Path) -> Option<Connection> {
     Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
 }
 
-/// Live (not archived) sessions.
+/// Live (not archived) root sessions. A session with a parent_id is a subagent run
+/// that belongs to its parent, so it is not a conversation of its own and is left out.
+/// Stores without a parent_id column (older OpenCode versions) are read as before.
 pub fn sessions(db: &Path) -> Vec<Session> {
     let Some(con) = open_ro(db) else { return Vec::new() };
-    let Ok(mut stmt) = con.prepare(
-        "select id, time_updated, directory, title from session where time_archived is null",
-    ) else {
+    let has_parent = con
+        .prepare("select 1 from pragma_table_info('session') where name = 'parent_id'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    let sql = if has_parent {
+        "select id, time_updated, directory, title from session \
+         where time_archived is null and parent_id is null"
+    } else {
+        "select id, time_updated, directory, title from session where time_archived is null"
+    };
+    let Ok(mut stmt) = con.prepare(sql) else {
         return Vec::new();
     };
     let rows = stmt.query_map([], |r| {

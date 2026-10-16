@@ -35,6 +35,7 @@ fn which(name: &str) -> Option<PathBuf> {
 
 #[test]
 fn a_session_exports_and_converts_to_a_journal() {
+    let _exec = exec_guard();
     let Some(cli) = opencode_cli() else {
         eprintln!("skipped: opencode CLI not installed");
         return;
@@ -55,6 +56,7 @@ fn a_session_exports_and_converts_to_a_journal() {
 
 #[test]
 fn a_banner_before_the_json_is_skipped() {
+    let _exec = exec_guard();
     // The export can print a line before the JSON. The converter must still read it.
     let sb = sandbox("banner");
     let fake_cli = sb.join("fake-opencode");
@@ -68,6 +70,7 @@ fn a_banner_before_the_json_is_skipped() {
 
 #[test]
 fn a_failing_export_is_an_error_and_writes_no_journal() {
+    let _exec = exec_guard();
     let sb = sandbox("fail");
     let fake_cli = sb.join("fail-opencode");
     fs::write(&fake_cli, "#!/bin/sh\necho boom >&2\nexit 3\n").unwrap();
@@ -82,6 +85,7 @@ fn make_exec(p: &PathBuf) {
 
 #[test]
 fn stdout_to_a_file_keeps_a_large_export_whole() {
+    let _exec = exec_guard();
     // The truncation happens in the CLI when its stdout is a pipe: it writes the first
     // 196608 bytes and exits 0. The export is written to a file, not a pipe, so the
     // whole payload must survive. The fake CLI writes the full payload to stdout;
@@ -101,6 +105,7 @@ fn stdout_to_a_file_keeps_a_large_export_whole() {
 
 #[test]
 fn a_pipe_truncation_is_detected_as_a_failed_export_not_a_short_journal() {
+    let _exec = exec_guard();
     // If the export were truncated (as the CLI does through a pipe), hsconv must reject
     // the invalid JSON. A short journal must never be produced silently.
     let sb = sandbox("trunc");
@@ -116,3 +121,13 @@ fn a_pipe_truncation_is_detected_as_a_failed_export_not_a_short_journal() {
     assert!(!sb.join("ses_t.journal.jsonl").exists(), "no journal may be left from a truncated export");
 }
 
+
+/// Writing an executable while another test thread forks can make that exec fail with
+/// "Text file busy" (ETXTBSY): the forked child briefly inherits the open write handle.
+/// Every test in this file that writes a fake CLI or runs one holds this lock, so no
+/// fork happens while a script is open for writing.
+#[allow(dead_code)]
+fn exec_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}

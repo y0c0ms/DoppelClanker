@@ -12,7 +12,11 @@
 //!                         "New session - <ts>" titles are dropped, not kept)
 //!   message.role       -> message.role (user | assistant)
 //!   text parts         -> text content blocks
-//!   tool parts         -> not converted yet (reported in `Stats`)
+//!   tool parts         -> a toolCall block in the assistant message, plus, when the
+//!                         tool finished (status completed or error), one toolResult
+//!                         message right after the assistant message, in call order.
+//!                         A pending or running tool keeps its call and gets no result.
+//!                         Shapes and rules from session-migrate (xhluca, MIT).
 //!   reasoning parts    -> dropped (the README keeps reasoning for omp/Pi, but
 //!                         an OpenCode reasoning block has no omp signature
 //!                         and is not needed to resume the conversation)
@@ -26,6 +30,9 @@ pub struct Stats {
     pub text_parts: usize,
     pub skipped_tool_parts: usize,
     pub skipped_reasoning_parts: usize,
+    pub tool_calls: usize,
+    pub tool_results: usize,
+    pub unfinished_tool_parts: usize,
 }
 
 /// Parse the export text (banner allowed) into a JSON value.
@@ -68,6 +75,8 @@ pub fn to_journal_lines(export: &Value) -> Result<(Vec<String>, Stats), String> 
         let created = minfo.get("time").and_then(|t| t.get("created")).and_then(Value::as_i64).unwrap_or(created_ms);
 
         let mut content: Vec<Value> = Vec::new();
+        // Tool results found in this message: (call id, tool name, text, is_error).
+        let mut results: Vec<(String, String, String, bool)> = Vec::new();
         for p in m.get("parts").and_then(Value::as_array).into_iter().flatten() {
             match p.get("type").and_then(Value::as_str) {
                 Some("text") => {
@@ -79,6 +88,34 @@ pub fn to_journal_lines(export: &Value) -> Result<(Vec<String>, Stats), String> 
                 }
                 Some("reasoning") => stats.skipped_reasoning_parts += 1,
                 Some("step-start") | Some("step-finish") => {}
+                Some("tool") if role == "assistant" => {
+                    let cid = p.get("callID").and_then(Value::as_str).unwrap_or("");
+                    if cid.is_empty() {
+                        stats.skipped_tool_parts += 1;
+                        continue;
+                    }
+                    let name = p.get("tool").and_then(Value::as_str).unwrap_or("unknown_tool");
+                    let state = p.get("state").and_then(Value::as_object);
+                    let mut args = state.and_then(|st| st.get("input")).cloned().unwrap_or_else(|| json!({}));
+                    if !args.is_object() {
+                        args = json!({"input": args});
+                    }
+                    content.push(json!({"type": "toolCall", "id": cid, "name": name, "arguments": args}));
+                    stats.tool_calls += 1;
+                    let status = state.and_then(|st| st.get("status")).and_then(Value::as_str).unwrap_or("");
+                    let text_of = |k: &str| -> String {
+                        match state.and_then(|st| st.get(k)) {
+                            Some(Value::String(t)) => t.clone(),
+                            Some(Value::Null) | None => String::new(),
+                            Some(other) => other.to_string(),
+                        }
+                    };
+                    match status {
+                        "completed" => results.push((cid.into(), name.into(), text_of("output"), false)),
+                        "error" => results.push((cid.into(), name.into(), text_of("error"), true)),
+                        _ => stats.unfinished_tool_parts += 1,
+                    }
+                }
                 Some(_) => stats.skipped_tool_parts += 1,
                 None => {}
             }
@@ -97,8 +134,28 @@ pub fn to_journal_lines(export: &Value) -> Result<(Vec<String>, Stats), String> 
         rec.insert("timestamp".into(), iso_ms(created).into());
         rec.insert("message".into(), Value::Object(msg));
         lines.push(serde_json::to_string(&rec).map_err(|e| e.to_string())?);
-        prev = Some(id);
+        prev = Some(id.clone());
         stats.messages += 1;
+        // One toolResult message per finished tool, chained after the assistant message.
+        for (n, (cid, name, text, is_error)) in results.into_iter().enumerate() {
+            let rid = format!("{id}-r{n}");
+            let mut rm = Map::new();
+            rm.insert("role".into(), "toolResult".into());
+            rm.insert("toolCallId".into(), cid.into());
+            rm.insert("toolName".into(), name.into());
+            rm.insert("content".into(), json!([{"type": "text", "text": text}]));
+            rm.insert("isError".into(), is_error.into());
+            let mut r = Map::new();
+            r.insert("type".into(), "message".into());
+            r.insert("id".into(), rid.clone().into());
+            r.insert("parentId".into(), prev.clone().map(Value::from).unwrap_or(Value::Null));
+            r.insert("timestamp".into(), iso_ms(created).into());
+            r.insert("message".into(), Value::Object(rm));
+            lines.push(serde_json::to_string(&r).map_err(|e| e.to_string())?);
+            prev = Some(rid);
+            stats.messages += 1;
+            stats.tool_results += 1;
+        }
     }
 
     if stats.messages == 0 {
@@ -142,6 +199,115 @@ fn iso_ms(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An export with one tool that completed and one that failed, as OpenCode writes
+    /// them: a single `tool` part per call, holding the input and the output or error.
+    fn tool_export() -> Value {
+        serde_json::from_str(r#"{
+          "info": {"id": "ses_t", "directory": "/tmp/p", "title": "Tools", "time": {"created": 1792000000000}},
+          "messages": [
+            {"info": {"id": "msg_u", "role": "user", "time": {"created": 1792000000001}},
+             "parts": [{"type": "text", "text": "list and read"}]},
+            {"info": {"id": "msg_a", "role": "assistant", "time": {"created": 1792000000002}},
+             "parts": [
+               {"type": "step-start"},
+               {"type": "text", "text": "Running."},
+               {"type": "tool", "callID": "call_ok", "tool": "bash",
+                "state": {"status": "completed", "input": {"command": "ls"}, "output": "a.txt\nb.txt",
+                          "title": "ls", "metadata": {}, "time": {"start": 1, "end": 2}}},
+               {"type": "tool", "callID": "call_bad", "tool": "read",
+                "state": {"status": "error", "input": {"filePath": "x"}, "error": "no such file",
+                          "time": {"start": 3, "end": 4}}},
+               {"type": "step-finish", "reason": "tool-calls"}
+             ]},
+            {"info": {"id": "msg_b", "role": "assistant", "time": {"created": 1792000000003}},
+             "parts": [{"type": "text", "text": "One file is missing."}]}
+          ]
+        }"#).unwrap()
+    }
+
+    fn recs(export: &Value) -> (Vec<Value>, Stats) {
+        let (lines, stats) = to_journal_lines(export).unwrap();
+        (lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect(), stats)
+    }
+
+    #[test]
+    fn a_tool_part_becomes_a_tool_call_in_the_assistant_message() {
+        let (r, stats) = recs(&tool_export());
+        let a = r.iter().find(|m| m["id"] == "msg_a").expect("assistant turn kept");
+        let c = a["message"]["content"].as_array().unwrap();
+        assert_eq!(c[0]["type"], "text");
+        assert_eq!(c[1]["type"], "toolCall");
+        assert_eq!(c[1]["id"], "call_ok");
+        assert_eq!(c[1]["name"], "bash");
+        assert_eq!(c[1]["arguments"]["command"], "ls");
+        assert_eq!(c[2]["id"], "call_bad");
+        assert_eq!(stats.tool_calls, 2);
+        assert_eq!(stats.skipped_tool_parts, 0);
+    }
+
+    #[test]
+    fn each_finished_tool_gets_a_tool_result_message_after_its_call() {
+        let (r, stats) = recs(&tool_export());
+        let ids: Vec<&str> = r.iter().skip(1).map(|m| m["id"].as_str().unwrap()).collect();
+        let a = ids.iter().position(|i| *i == "msg_a").unwrap();
+        let ok = r.iter().find(|m| m["message"]["toolCallId"] == "call_ok").expect("completed result");
+        let bad = r.iter().find(|m| m["message"]["toolCallId"] == "call_bad").expect("error result");
+        assert_eq!(ok["message"]["role"], "toolResult");
+        assert_eq!(ok["message"]["toolName"], "bash");
+        assert_eq!(ok["message"]["isError"], false);
+        assert_eq!(ok["message"]["content"][0]["text"], "a.txt\nb.txt");
+        assert_eq!(bad["message"]["isError"], true);
+        assert_eq!(bad["message"]["content"][0]["text"], "no such file");
+        assert_eq!(ok["parentId"], "msg_a", "first result follows the assistant message");
+        assert_eq!(bad["parentId"], ok["id"], "results are chained in call order");
+        assert!(ids.iter().position(|i| *i == ok["id"].as_str().unwrap()).unwrap() > a);
+        assert_eq!(stats.tool_results, 2);
+    }
+
+    #[test]
+    fn the_next_turn_links_to_the_last_tool_result() {
+        let (r, _) = recs(&tool_export());
+        let bad = r.iter().find(|m| m["message"]["toolCallId"] == "call_bad").unwrap();
+        let b = r.iter().find(|m| m["id"] == "msg_b").unwrap();
+        assert_eq!(b["parentId"], bad["id"], "the chain must run through the tool results");
+    }
+
+    #[test]
+    fn a_tool_that_never_finished_keeps_its_call_but_gets_no_result() {
+        // A pending or running tool has no output. Its call is kept so the turn reads
+        // correctly, and the missing result is counted, not invented.
+        let export: Value = serde_json::from_str(r#"{
+          "info": {"id": "ses_r", "directory": "/tmp", "time": {"created": 1}},
+          "messages": [
+            {"info": {"id": "msg_u", "role": "user", "time": {"created": 2}}, "parts": [{"type": "text", "text": "go"}]},
+            {"info": {"id": "msg_a", "role": "assistant", "time": {"created": 3}},
+             "parts": [{"type": "tool", "callID": "call_run", "tool": "bash",
+                        "state": {"status": "running", "input": {"command": "sleep 9"}, "time": {"start": 1}}}]}
+          ]
+        }"#).unwrap();
+        let (r, stats) = recs(&export);
+        assert!(r.iter().all(|m| m["message"]["role"] != "toolResult"));
+        assert_eq!(stats.tool_calls, 1);
+        assert_eq!(stats.unfinished_tool_parts, 1);
+    }
+
+    #[test]
+    fn a_tool_part_without_a_call_id_is_skipped_and_counted() {
+        let export: Value = serde_json::from_str(r#"{
+          "info": {"id": "ses_n", "directory": "/tmp", "time": {"created": 1}},
+          "messages": [
+            {"info": {"id": "msg_u", "role": "user", "time": {"created": 2}}, "parts": [{"type": "text", "text": "go"}]},
+            {"info": {"id": "msg_a", "role": "assistant", "time": {"created": 3}},
+             "parts": [{"type": "text", "text": "ok"},
+                       {"type": "tool", "tool": "bash", "state": {"status": "completed", "input": {}, "output": "x"}}]}
+          ]
+        }"#).unwrap();
+        let (r, stats) = recs(&export);
+        assert!(r.iter().all(|m| m["message"]["role"] != "toolResult"));
+        assert_eq!(stats.tool_calls, 0);
+        assert_eq!(stats.skipped_tool_parts, 1);
+    }
 
     fn export(text_user: &str, text_asst: &str) -> Value {
         json!({

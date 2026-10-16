@@ -12,6 +12,7 @@ ratatui = "0.30"
 rusqlite = { version = "0.32", features = ["bundled"] }
 crossterm = "0.29"
 sha2 = "0.10"
+zstd = "0.13"
 
 [dev-dependencies]
 proptest = "1"
