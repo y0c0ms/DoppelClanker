@@ -146,6 +146,10 @@ fn health_is_503_when_the_store_does_not_answer() {
         fn save_owner(&mut self, s: &str, m: &str, who: &str) { self.0.save_owner(s, m, who) }
         fn load_enrolled_at(&self, s: &str, m: &str) -> Option<u64> { self.0.load_enrolled_at(s, m) }
         fn save_enrolled_at(&mut self, s: &str, m: &str, at: u64) { self.0.save_enrolled_at(s, m, at) }
+        fn save_trust_list(&mut self, s: &str, b: Vec<u8>) { self.0.save_trust_list(s, b) }
+        fn load_trust_list(&self, s: &str) -> Option<Vec<u8>> { self.0.load_trust_list(s) }
+        fn save_admin_key(&mut self, s: &str, k: Vec<u8>) { self.0.save_admin_key(s, k) }
+        fn load_admin_key(&self, s: &str) -> Option<Vec<u8>> { self.0.load_admin_key(s) }
         fn ping(&self) -> bool { false }
     }
     let s = Service::new(Down(MemoryStore::default()));

@@ -2,6 +2,7 @@
 pub mod auth;
 pub mod membership;
 pub mod session_keys;
+pub mod signed_records;
 pub mod metrics;
 pub mod server;
 pub mod backup;

@@ -196,6 +196,24 @@ async fn write_record<S: Store + Send + 'static>(State(s): State<Shared<S>>, hea
 }
 
 #[derive(Deserialize)]
+struct SealedQuery { space: String, conversation: String }
+
+/// Store a client-sealed, signed record. The body is the record exactly as the device made it.
+/// The server verifies the author against the admin-pinned trust root and stores the bytes as
+/// they are; it never decrypts them. Refused with 403 when the author is not listed.
+async fn write_sealed<S: Store + Send + 'static>(State(s): State<Shared<S>>,
+                                                 axum::extract::Query(q): axum::extract::Query<SealedQuery>,
+                                                 body: Bytes) -> Response {
+    let record = body.to_vec();
+    let r = run(s.clone(), move |svc, _| match svc.put_client_sealed(&q.space, &q.conversation, record) {
+        Ok(()) => (200, json!({"stored": true})),
+        Err(crate::service::ServiceError::NotMember(_)) => (403, json!({"error": "record not accepted"})),
+        Err(e) => crate::http::error_response(&e),
+    }).await;
+    counted(&s, "record_sealed", r)
+}
+
+#[derive(Deserialize)]
 struct ReadBody { space: String, conversation: String, machine: String }
 
 /// Read one session. Members only; returns the plaintext to the member who asks.
@@ -234,5 +252,6 @@ pub fn router<S: Store + Send + 'static>(state: Shared<S>) -> Router {
         .route("/sessions", post(sessions::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/record/read", post(read_record::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/record", post(write_record::<S>).layer(DefaultBodyLimit::max(MAX_SESSION_BODY)))
+        .route("/record/sealed", post(write_sealed::<S>).layer(DefaultBodyLimit::max(MAX_SESSION_BODY)))
         .with_state(state)
 }

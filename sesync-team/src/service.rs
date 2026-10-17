@@ -46,6 +46,11 @@ pub trait Store {
     fn list_conversations(&self, space: &str) -> Vec<String>;
     /// True if the store answers a trivial query. Used by the health check.
     fn ping(&self) -> bool;
+    fn save_trust_list(&mut self, space: &str, bytes: Vec<u8>);
+    fn load_trust_list(&self, space: &str) -> Option<Vec<u8>>;
+    /// The admin public key pinned for a space at creation.
+    fn save_admin_key(&mut self, space: &str, key: Vec<u8>);
+    fn load_admin_key(&self, space: &str) -> Option<Vec<u8>>;
     fn load_gate(&self, space: &str, machine: &str) -> Option<JoinGate>;
     fn save_gate(&mut self, space: &str, machine: &str, gate: JoinGate);
     fn load_backup(&self, space: &str) -> Option<BackupPolicy>;
@@ -65,6 +70,8 @@ pub struct MemoryStore {
     gates: HashMap<(String, String), JoinGate>,
     backups: HashMap<String, BackupPolicy>,
     owners: HashMap<(String, String), String>,
+    trust: HashMap<String, Vec<u8>>,
+    admin_keys: HashMap<String, Vec<u8>>,
     enrolled_at: HashMap<(String, String), u64>,
 }
 
@@ -75,6 +82,10 @@ impl Store for MemoryStore {
         self.records.get(&(space.to_string(), conv.to_string())).cloned()
     }
     fn ping(&self) -> bool { true }
+    fn save_trust_list(&mut self, space: &str, bytes: Vec<u8>) { self.trust.insert(space.to_string(), bytes); }
+    fn load_trust_list(&self, space: &str) -> Option<Vec<u8>> { self.trust.get(space).cloned() }
+    fn save_admin_key(&mut self, space: &str, key: Vec<u8>) { self.admin_keys.insert(space.to_string(), key); }
+    fn load_admin_key(&self, space: &str) -> Option<Vec<u8>> { self.admin_keys.get(space).cloned() }
     fn list_conversations(&self, space: &str) -> Vec<String> {
         let mut ids: Vec<String> = self.records.keys()
             .filter(|(s, _)| s == space)
@@ -266,6 +277,38 @@ impl<S: Store> Service<S> {
     /// for a missing space or a refused code.
     fn check_store(&self) -> Result<(), ServiceError> {
         if self.store.ping() { Ok(()) } else { Err(ServiceError::Unavailable) }
+    }
+
+    /// Store the space's trust root: the admin-signed member list as bytes. The server uses it to
+    /// accept client-sealed records, and cannot forge it (it is signed by the admin key).
+    pub fn store_trust_list(&mut self, space: &str, signed_list: &[u8]) -> Result<(), ServiceError> {
+        self.store.save_trust_list(space, signed_list.to_vec());
+        Ok(())
+    }
+
+    /// Pin the admin's public key for a space. Done once, when the team is created.
+    pub fn pin_admin_key(&mut self, space: &str, admin_public: &[u8]) -> Result<(), ServiceError> {
+        self.store.save_admin_key(space, admin_public.to_vec());
+        Ok(())
+    }
+
+    /// Store a client-sealed record after checking it against the space's trust root. The server
+    /// does not decrypt it: it verifies the author's signature and the list version, then stores
+    /// the bytes exactly as sent.
+    pub fn put_client_sealed(&mut self, space: &str, conv: &str, record: Vec<u8>) -> Result<(), ServiceError> {
+        self.check_store()?;
+        let list_bytes = self.store.load_trust_list(space).ok_or(ServiceError::NotMember(space.into()))?;
+        let admin = self.store.load_admin_key(space).ok_or(ServiceError::NotMember(space.into()))?;
+        let signed = crate::membership::SignedList::from_bytes(&list_bytes)
+            .map_err(|_| ServiceError::Crypto("trust root unreadable".into()))?;
+        // The verifier is anchored to the admin key pinned at team creation, never to a key the
+        // list itself names: anyone who can write a list must not be able to choose the admin.
+        let mut verifier = crate::membership::Verifier::new(admin);
+        verifier.accept(&signed).map_err(|_| ServiceError::Crypto("trust root not admin-signed".into()))?;
+        crate::signed_records::open_record(&verifier, &record)
+            .map_err(|e| ServiceError::NotMember(format!("{e:?}")))?;
+        self.store.put_record(space, conv, record);
+        Ok(())
     }
 
     /// Whether the store is reachable. The health check reports this, nothing else.
