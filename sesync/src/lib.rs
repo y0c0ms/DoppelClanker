@@ -18,6 +18,7 @@ pub mod scan;
 pub mod state;
 pub mod team_cli;
 pub mod team_join;
+pub mod team_push;
 pub mod titles;
 pub mod tui;
 pub mod ui;
