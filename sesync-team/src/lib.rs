@@ -1,5 +1,6 @@
 //! Team sync core. See the tests for the behaviour each module must keep.
 pub mod auth;
+pub mod membership;
 pub mod metrics;
 pub mod server;
 pub mod backup;
