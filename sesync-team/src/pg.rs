@@ -66,6 +66,8 @@ impl PgStore {
                  PRIMARY KEY (space, machine));
              CREATE TABLE IF NOT EXISTS backups (space TEXT PRIMARY KEY, policy TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS owners (space TEXT NOT NULL, machine TEXT NOT NULL, member TEXT NOT NULL,
+                 PRIMARY KEY (space, machine));
+             CREATE TABLE IF NOT EXISTS enrolled (space TEXT NOT NULL, machine TEXT NOT NULL, at BIGINT NOT NULL,
                  PRIMARY KEY (space, machine));",
         ).map_err(|e| match e.as_db_error() {
             Some(db) => format!("{}: {}", db.code().code(), db.message()),
@@ -176,6 +178,22 @@ impl Store for PgStore {
         self.client.borrow_mut()
             .query_opt("SELECT member FROM owners WHERE space = $1 AND machine = $2", &[&space, &machine])
             .ok().flatten().map(|r| r.get::<_, String>(0))
+    }
+
+    fn load_enrolled_at(&self, space: &str, machine: &str) -> Option<u64> {
+        self.ensure_connected();
+        self.client.borrow_mut()
+            .query_opt("SELECT at FROM enrolled WHERE space = $1 AND machine = $2", &[&space, &machine])
+            .ok().flatten().map(|r| r.get::<_, i64>(0) as u64)
+    }
+
+    fn save_enrolled_at(&mut self, space: &str, machine: &str, at: u64) {
+        self.ensure_connected();
+        // The first confirmed enrolment sets the start of the renewal window; later ones keep it.
+        let _ = self.client.borrow_mut().execute(
+            "INSERT INTO enrolled (space, machine, at) VALUES ($1, $2, $3)
+             ON CONFLICT (space, machine) DO NOTHING",
+            &[&space, &machine, &(at as i64)]);
     }
 
     fn save_owner(&mut self, space: &str, machine: &str, member: &str) {

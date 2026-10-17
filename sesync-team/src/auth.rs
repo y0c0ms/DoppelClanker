@@ -19,6 +19,24 @@ pub fn issue_token(key: &[u8; 32], member: &str, machine: &str, expires_at: u64)
     format!("{body}|{}", sign(key, &body))
 }
 
+/// Check a token's signature and machine, ignoring its expiry. Used only for renewal: a token
+/// that expired a few minutes ago still proves the machine holds it, and the renewal checks the
+/// enrolment window separately. Never use this to grant access on its own.
+pub fn check_token_ignoring_expiry(key: &[u8; 32], token: &str, machine: &str) -> Result<String, AuthError> {
+    let parts: Vec<&str> = token.split('|').collect();
+    if parts.len() != 4 {
+        return Err(AuthError::Malformed);
+    }
+    let body = format!("{}|{}|{}", parts[0], parts[1], parts[2]);
+    if sign(key, &body) != parts[3] {
+        return Err(AuthError::BadSignature);
+    }
+    if parts[1] != machine {
+        return Err(AuthError::WrongMachine);
+    }
+    Ok(parts[0].to_string())
+}
+
 /// Check a token presented by `machine` at `now`. Returns the member on success.
 pub fn check_token(key: &[u8; 32], token: &str, machine: &str, now: u64) -> Result<String, AuthError> {
     let parts: Vec<&str> = token.split('|').collect();

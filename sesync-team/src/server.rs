@@ -50,6 +50,17 @@ fn is_admin<S: Store + Send + 'static>(state: &AppState<S>, auth: Option<&str>) 
 }
 
 #[derive(Deserialize)]
+struct RenewBody { space: String, machine: String }
+
+/// Renew this machine's member token silently, while its enrolment is within the 7-day window.
+async fn renew_token<S: Store + Send + 'static>(State(s): State<Shared<S>>, headers: HeaderMap, body: Bytes) -> Response {
+    let body: RenewBody = match parse(&body) { Ok(b) => b, Err(r) => return r };
+    let auth = auth_header(&headers);
+    let r = run(s.clone(), move |svc, now| http::renew(svc, auth.as_deref(), &body.space, &body.machine, now)).await;
+    counted(&s, "renew", r)
+}
+
+#[derive(Deserialize)]
 struct CreateBody { space: String, members: Vec<String> }
 
 #[derive(Deserialize)]
@@ -213,6 +224,7 @@ async fn read_record<S: Store + Send + 'static>(State(s): State<Shared<S>>, head
 pub fn router<S: Store + Send + 'static>(state: Shared<S>) -> Router {
     Router::new()
         .route("/healthz", get(healthz::<S>))
+        .route("/renew", post(renew_token::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/admin/team", post(admin_create::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/admin/invite", post(admin_invite::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/metrics", get(metrics_route::<S>))
