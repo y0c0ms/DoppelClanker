@@ -61,7 +61,24 @@ async fn renew_token<S: Store + Send + 'static>(State(s): State<Shared<S>>, head
 }
 
 #[derive(Deserialize)]
-struct CreateBody { space: String, members: Vec<String> }
+struct CreateBody {
+    space: String,
+    members: Vec<String>,
+    /// Optional: the admin's Ed25519 public key (hex). When given, it is pinned and the signed
+    /// member list in `devices` (hex entries) is stored as the trust root.
+    #[serde(default)]
+    admin_public: Option<String>,
+    #[serde(default)]
+    devices: Vec<String>,
+    /// The admin-signed member list (hex of SignedList::to_bytes). Required with an admin key.
+    #[serde(default)]
+    signed_list: Option<String>,
+}
+
+fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 { return None; }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+}
 
 #[derive(Deserialize)]
 struct InviteBody { space: String, member: String }
@@ -78,6 +95,38 @@ async fn admin_create<S: Store + Send + 'static>(State(s): State<Shared<S>>, hea
         let members: Vec<&str> = body.members.iter().map(String::as_str).collect();
         match svc.create_space(&body.space, &members) {
             Ok(()) => {
+                if let Some(admin_hex) = &body.admin_public {
+                    let Some(admin) = from_hex(admin_hex) else {
+                        return (400, json!({"error": "admin key is not hex"}));
+                    };
+                    if svc.pin_admin_key(&body.space, &admin).is_err() {
+                        return (500, json!({"error": "could not pin the admin key"}));
+                    }
+                    // The first list is version 1 and is signed by the admin key; it is stored as
+                    // the trust root. The admin signs it on the admin machine, so the server holds
+                    // a list it cannot forge.
+                    let entries: Option<Vec<Vec<u8>>> = body.devices.iter().map(|h| from_hex(h)).collect();
+                    let Some(entries) = entries else {
+                        return (400, json!({"error": "device entry is not hex"}));
+                    };
+                    let list = crate::membership::MemberList::new(1, entries);
+                    let signed_bytes = match body.signed_list.as_deref().and_then(from_hex) {
+                        Some(b) => b,
+                        None => return (400, json!({"error": "signed list is required with an admin key"})),
+                    };
+                    let signed = match crate::membership::SignedList::from_bytes(&signed_bytes) {
+                        Ok(s) => s,
+                        Err(_) => return (400, json!({"error": "signed list is malformed"})),
+                    };
+                    if signed.list != list {
+                        return (400, json!({"error": "signed list does not match the devices"}));
+                    }
+                    let mut v = crate::membership::Verifier::new(admin.clone());
+                    if v.accept(&signed).is_err() {
+                        return (400, json!({"error": "signed list is not signed by the admin key"}));
+                    }
+                    let _ = svc.store_trust_list(&body.space, &signed_bytes);
+                }
                 let secret = svc.space_secret(&body.space).unwrap_or_default();
                 let uri = crate::totp::otpauth_uri(&secret, &body.space);
                 (200, json!({"space": body.space, "otpauth_uri": uri}))
@@ -196,21 +245,57 @@ async fn write_record<S: Store + Send + 'static>(State(s): State<Shared<S>>, hea
 }
 
 #[derive(Deserialize)]
-struct SealedQuery { space: String, conversation: String }
+struct SealedQuery { space: String, conversation: String, machine: String, version: u64 }
 
 /// Store a client-sealed, signed record. The body is the record exactly as the device made it.
 /// The server verifies the author against the admin-pinned trust root and stores the bytes as
 /// they are; it never decrypts them. Refused with 403 when the author is not listed.
-async fn write_sealed<S: Store + Send + 'static>(State(s): State<Shared<S>>,
+async fn write_sealed<S: Store + Send + 'static>(State(s): State<Shared<S>>, headers: HeaderMap,
                                                  axum::extract::Query(q): axum::extract::Query<SealedQuery>,
                                                  body: Bytes) -> Response {
     let record = body.to_vec();
-    let r = run(s.clone(), move |svc, _| match svc.put_client_sealed(&q.space, &q.conversation, record) {
-        Ok(()) => (200, json!({"stored": true})),
-        Err(crate::service::ServiceError::NotMember(_)) => (403, json!({"error": "record not accepted"})),
-        Err(e) => crate::http::error_response(&e),
+    let auth = auth_header(&headers);
+    let r = run(s.clone(), move |svc, now| {
+        // A caller needs a token for its machine, and the write must come from the lease holder.
+        if let Err(r) = http::require_token(svc, &q.space, auth.as_deref(), &q.machine, now) {
+            return r;
+        }
+        match svc.put_sealed_leased(&q.space, &q.conversation, &q.machine, q.version, record) {
+            Ok(()) => (200, json!({"stored": true})),
+            Err(crate::service::ServiceError::NotMember(_)) => (403, json!({"error": "record not accepted"})),
+            Err(e) => crate::http::error_response(&e),
+        }
     }).await;
     counted(&s, "record_sealed", r)
+}
+
+/// Read a client-sealed record. Members only, with a token for the requesting machine. The bytes
+/// returned are the stored signed record; the server does not open them.
+async fn read_sealed<S: Store + Send + 'static>(State(s): State<Shared<S>>, headers: HeaderMap, body: Bytes) -> Response {
+    let body: ReadBody = match parse(&body) { Ok(b) => b, Err(r) => return r };
+    let auth = auth_header(&headers);
+    let state = s.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let now = (state.clock)();
+        let svc = state.service.lock().unwrap_or_else(|p| p.into_inner());
+        let token = auth.as_deref().and_then(|h| h.strip_prefix("Bearer "));
+        let Some(token) = token else {
+            return (401, Err(json!({"error": "missing bearer token"})));
+        };
+        if let Err(e) = svc.authenticate(&body.space, token, &body.machine, now) {
+            let (st, msg) = crate::http::error_response(&e);
+            return (st, Err(msg));
+        }
+        match svc.raw_stored(&body.space, &body.conversation) {
+            Some(bytes) => (200, Ok(bytes)),
+            None => (404, Err(json!({"error": "no such record"}))),
+        }
+    }).await;
+    match result {
+        Ok((200, Ok(bytes))) => (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
+        Ok((st, Err(msg))) => respond((st, msg)),
+        _ => respond((500, json!({"error": "internal error"}))),
+    }
 }
 
 #[derive(Deserialize)]
@@ -252,6 +337,7 @@ pub fn router<S: Store + Send + 'static>(state: Shared<S>) -> Router {
         .route("/sessions", post(sessions::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/record/read", post(read_record::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/record", post(write_record::<S>).layer(DefaultBodyLimit::max(MAX_SESSION_BODY)))
+        .route("/record/sealed/read", post(read_sealed::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/record/sealed", post(write_sealed::<S>).layer(DefaultBodyLimit::max(MAX_SESSION_BODY)))
         .with_state(state)
 }

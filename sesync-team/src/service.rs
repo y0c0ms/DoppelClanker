@@ -286,6 +286,16 @@ impl<S: Store> Service<S> {
         Ok(())
     }
 
+    /// The pinned admin public key for a space, if one was set.
+    pub fn load_admin_key_for_test(&self, space: &str) -> Option<Vec<u8>> {
+        self.store.load_admin_key(space)
+    }
+
+    /// The stored trust list for a space, if one was set.
+    pub fn load_trust_list_for_test(&self, space: &str) -> Option<Vec<u8>> {
+        self.store.load_trust_list(space)
+    }
+
     /// Pin the admin's public key for a space. Done once, when the team is created.
     pub fn pin_admin_key(&mut self, space: &str, admin_public: &[u8]) -> Result<(), ServiceError> {
         self.store.save_admin_key(space, admin_public.to_vec());
@@ -309,6 +319,21 @@ impl<S: Store> Service<S> {
             .map_err(|e| ServiceError::NotMember(format!("{e:?}")))?;
         self.store.put_record(space, conv, record);
         Ok(())
+    }
+
+    /// Store a client-sealed record for the conversation, but only from the machine holding its
+    /// lease, under the version the lease granted. The lease is checked first, then the record's
+    /// author against the trust root; nothing is stored unless both pass.
+    pub fn put_sealed_leased(&mut self, space: &str, conv: &str, machine: &str, version: u64,
+                             record: Vec<u8>) -> Result<(), ServiceError> {
+        let key = format!("{space}/{conv}");
+        self.leases.check_write(&key, version, machine)?;
+        // Exact match: a writer may write only under the version it was granted, never a later one.
+        let current = self.leases.current_version(&key);
+        if current != Some(version) {
+            return Err(ServiceError::Lease(format!("version {version} was not granted")));
+        }
+        self.put_client_sealed(space, conv, record)
     }
 
     /// Whether the store is reachable. The health check reports this, nothing else.

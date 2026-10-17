@@ -36,7 +36,17 @@ async fn a_session_goes_from_one_listed_device_to_another_without_the_server_rea
     let body = seal_session(&key, text).unwrap();
     let wraps = wrap_for(&key, &[writer.box_public(), reader.box_public()]).unwrap();
     let record = seal_record(&writer, 1, &encode_with_wraps(&wraps, &body)).unwrap();
-    let req = Request::builder().method("POST").uri("/record/sealed?space=personal&conversation=ses_rt")
+    // The writer holds the lease on the conversation and writes under the granted version.
+    let (version, token) = {
+        let mut svc = state.service.lock().unwrap();
+        let code = sesync_team::totp::code_at(&svc.space_secret("personal").unwrap(), T0);
+        let token = svc.enrol("personal", "writer", "box-w", &code, T0).unwrap();
+        let lease = svc.acquire("personal", "ses_rt", "box-w", T0).unwrap();
+        (lease.version, token)
+    };
+    let uri = format!("/record/sealed?space=personal&conversation=ses_rt&machine=box-w&version={version}");
+    let req = Request::builder().method("POST").uri(uri)
+        .header("authorization", format!("Bearer {token}"))
         .header("content-type", "application/octet-stream").body(Body::from(record.clone())).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

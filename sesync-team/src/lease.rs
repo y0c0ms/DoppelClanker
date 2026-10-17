@@ -86,6 +86,11 @@ impl LeaseTable {
 
     /// Check a write made under `version` by `machine`. Refused if the version is stale, or
     /// the machine is no longer the holder.
+    /// The version of the live lease on a conversation, if one is held.
+    pub fn current_version(&self, conversation: &str) -> Option<u64> {
+        self.leases.get(conversation).map(|l| l.version)
+    }
+
     pub fn check_write(&self, conversation: &str, version: u64, machine: &str) -> Result<(), LeaseError> {
         let cur = self.leases.get(conversation).ok_or(LeaseError::Missing)?;
         if version < cur.version {
