@@ -58,9 +58,9 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 }
 
 Write-Host "== building"
-Push-Location (Join-Path $Root "lock");      cargo build --release --quiet; Pop-Location
+Push-Location (Join-Path $Root "sesync-lock");      cargo build --release --quiet; Pop-Location
 Push-Location (Join-Path $Root "sesync-conv");    cargo build --release --quiet; Pop-Location
-Push-Location (Join-Path $Root "daemon-rs"); cargo build --release --quiet; Pop-Location
+Push-Location (Join-Path $Root "sesync"); cargo build --release --quiet; Pop-Location
 
 New-Item -ItemType Directory -Force -Path $Bin, (Join-Path $Share "hooks") | Out-Null
 $recorded = @()
