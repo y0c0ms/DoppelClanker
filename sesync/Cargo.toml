@@ -9,6 +9,9 @@ description = "sesync daemon (Rust port of daemon/harness_sync.py)."
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1", features = ["v5"] }
+ring = "0.17"
+crypto_box = { version = "0.9", features = ["seal"] }
+sesync-team = { path = "../sesync-team", version = "0.1.0" }
 ratatui = "0.30"
 rusqlite = { version = "0.32", features = ["bundled"] }
 crossterm = "0.29"

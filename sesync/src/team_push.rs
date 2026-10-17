@@ -87,8 +87,22 @@ impl TeamRemote for HttpTeam {
     }
 
     fn put(&self, space: &str, conversation: &str, version: u64, bytes: &[u8]) -> Result<(), PushError> {
+        self.put_to("/record", space, conversation, version, bytes)
+    }
+
+    fn release(&self, space: &str, conversation: &str) -> Result<(), PushError> {
+        self.post("/lease/release", serde_json::json!({
+            "space": space, "conversation": conversation, "machine": self.machine}))?;
+        Ok(())
+    }
+}
+
+impl HttpTeam {
+    /// PUT-style write under a lease to `route`. `/record` is the plaintext route (the fallback);
+    /// `/record/sealed` takes a client-sealed, signed record and stores it without reading it.
+    pub fn put_to(&self, route: &str, space: &str, conversation: &str, version: u64, bytes: &[u8]) -> Result<(), PushError> {
         let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(60)).build();
-        let url = format!("{}/record?space={space}&conversation={conversation}&machine={}&version={version}",
+        let url = format!("{}{route}?space={space}&conversation={conversation}&machine={}&version={version}",
                           self.base.trim_end_matches('/'), self.machine);
         match agent.post(&url).set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/octet-stream").send_bytes(bytes) {
@@ -97,11 +111,5 @@ impl TeamRemote for HttpTeam {
             Err(ureq::Error::Status(code, _)) => Err(PushError::Refused(format!("server refused ({code})"))),
             Err(_) => Err(PushError::Unreachable),
         }
-    }
-
-    fn release(&self, space: &str, conversation: &str) -> Result<(), PushError> {
-        self.post("/lease/release", serde_json::json!({
-            "space": space, "conversation": conversation, "machine": self.machine}))?;
-        Ok(())
     }
 }

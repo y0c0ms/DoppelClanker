@@ -3,6 +3,8 @@ pub mod app;
 pub mod archive;
 pub mod archive_store;
 pub mod claude_source;
+pub mod device_keys;
+pub mod sealed;
 pub mod discovery;
 pub mod divergence;
 pub mod install;
