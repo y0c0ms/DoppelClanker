@@ -49,6 +49,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(e) = store.migrate() {
+        log("error", "schema_unavailable", &[("reason", e)]);
+        std::process::exit(1);
+    }
     log("info", "started", &[("bind", bind.clone())]);
     let state = Arc::new(AppState { service: Mutex::new(Service::new(store)), clock: server::system_clock(),
                                     metrics: Default::default() });

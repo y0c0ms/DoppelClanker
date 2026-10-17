@@ -1,0 +1,7 @@
+# Runs when the backup fails. Writes a line to the journal; the operator's alerting reads it.
+[Unit]
+Description=Report a failed team database backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p user.err -t team-backup "team database backup FAILED; see journalctl --user -u team-backup.service"
