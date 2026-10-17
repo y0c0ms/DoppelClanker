@@ -53,6 +53,9 @@ pub trait Store {
     fn load_token_key(&self, space: &str) -> Option<[u8; 32]>;
     fn load_owner(&self, space: &str, machine: &str) -> Option<String>;
     fn save_owner(&mut self, space: &str, machine: &str, member: &str);
+    /// When this machine's enrolment was confirmed by the code. Set once; never moved forward.
+    fn load_enrolled_at(&self, space: &str, machine: &str) -> Option<u64>;
+    fn save_enrolled_at(&mut self, space: &str, machine: &str, at: u64);
 }
 
 #[derive(Default)]
@@ -62,6 +65,7 @@ pub struct MemoryStore {
     gates: HashMap<(String, String), JoinGate>,
     backups: HashMap<String, BackupPolicy>,
     owners: HashMap<(String, String), String>,
+    enrolled_at: HashMap<(String, String), u64>,
 }
 
 impl Store for MemoryStore {
@@ -95,6 +99,12 @@ impl Store for MemoryStore {
     fn load_owner(&self, space: &str, machine: &str) -> Option<String> {
         self.owners.get(&(space.to_string(), machine.to_string())).cloned()
     }
+    fn load_enrolled_at(&self, space: &str, machine: &str) -> Option<u64> {
+        self.enrolled_at.get(&(space.to_string(), machine.to_string())).copied()
+    }
+    fn save_enrolled_at(&mut self, space: &str, machine: &str, at: u64) {
+        self.enrolled_at.entry((space.to_string(), machine.to_string())).or_insert(at);
+    }
     fn save_owner(&mut self, space: &str, machine: &str, member: &str) {
         self.owners.insert((space.to_string(), machine.to_string()), member.to_string());
     }
@@ -105,6 +115,10 @@ impl Store for MemoryStore {
 
 /// Token lifetime: 24 hours. After that the machine must confirm the authenticator again.
 pub const TOKEN_LIFETIME_SECS: u64 = 24 * 60 * 60;
+
+/// A member can renew silently for this long after the code-confirmed enrolment. After that the
+/// authenticator code is required again.
+pub const RENEW_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
 
 pub struct Service<S: Store> {
     store: S,
@@ -184,8 +198,26 @@ impl<S: Store> Service<S> {
         -> Result<String, ServiceError>
     {
         self.join(space, who, machine, code, now)?;
+        self.store.save_enrolled_at(space, machine, now);
         let key = self.store.load_token_key(space).ok_or_else(|| ServiceError::NoSpace(space.into()))?;
         Ok(crate::auth::issue_token(&key, who, machine, now + TOKEN_LIFETIME_SECS))
+    }
+
+    /// Renew a member token without the code. Allowed only if the token is valid for this
+    /// machine (or was valid recently enough to prove possession), and the enrolment is still
+    /// inside the 7-day window. The new token never outlives the window.
+    pub fn renew(&mut self, space: &str, token: &str, machine: &str, now: u64) -> Result<String, ServiceError> {
+        let key = self.store.load_token_key(space).ok_or_else(|| ServiceError::NoSpace(space.into()))?;
+        let member = crate::auth::check_token_ignoring_expiry(&key, token, machine)
+            .map_err(|e| ServiceError::Auth(format!("{e:?}")))?;
+        let enrolled = self.store.load_enrolled_at(space, machine)
+            .ok_or_else(|| ServiceError::Auth("not enrolled on this machine".into()))?;
+        let window_end = enrolled + RENEW_WINDOW_SECS;
+        if now >= window_end {
+            return Err(ServiceError::Auth("enrolment window passed; the authenticator code is needed".into()));
+        }
+        let expires = (now + TOKEN_LIFETIME_SECS).min(window_end);
+        Ok(crate::auth::issue_token(&key, &member, machine, expires))
     }
 
     /// Check a token from a machine and return the member it was issued to.

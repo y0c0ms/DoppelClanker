@@ -26,6 +26,8 @@ impl Store for Flaky {
     fn load_token_key(&self, s: &str) -> Option<[u8; 32]> { if self.down.get() { None } else { self.inner.load_token_key(s) } }
     fn load_owner(&self, s: &str, m: &str) -> Option<String> { if self.down.get() { None } else { self.inner.load_owner(s, m) } }
     fn save_owner(&mut self, s: &str, m: &str, w: &str) { self.inner.save_owner(s, m, w) }
+    fn load_enrolled_at(&self, s: &str, m: &str) -> Option<u64> { self.inner.load_enrolled_at(s, m) }
+    fn save_enrolled_at(&mut self, s: &str, m: &str, at: u64) { self.inner.save_enrolled_at(s, m, at) }
     fn ping(&self) -> bool { !self.down.get() }
 }
 

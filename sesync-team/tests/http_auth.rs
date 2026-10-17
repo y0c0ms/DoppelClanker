@@ -144,6 +144,8 @@ fn health_is_503_when_the_store_does_not_answer() {
         fn load_token_key(&self, s: &str) -> Option<[u8; 32]> { self.0.load_token_key(s) }
         fn load_owner(&self, s: &str, m: &str) -> Option<String> { self.0.load_owner(s, m) }
         fn save_owner(&mut self, s: &str, m: &str, who: &str) { self.0.save_owner(s, m, who) }
+        fn load_enrolled_at(&self, s: &str, m: &str) -> Option<u64> { self.0.load_enrolled_at(s, m) }
+        fn save_enrolled_at(&mut self, s: &str, m: &str, at: u64) { self.0.save_enrolled_at(s, m, at) }
         fn ping(&self) -> bool { false }
     }
     let s = Service::new(Down(MemoryStore::default()));

@@ -68,6 +68,19 @@ pub fn health<S: Store>(svc: &Service<S>) -> (u16, Value) {
     }
 }
 
+/// Renew a member token. The old token is sent in the Authorization header; the new one is
+/// returned. Refused once the 7-day enrolment window has passed.
+pub fn renew<S: Store>(svc: &mut Service<S>, auth: Option<&str>, space: &str, machine: &str, now: u64) -> (u16, Value) {
+    let token = match auth.and_then(|h| h.strip_prefix("Bearer ")) {
+        Some(t) => t,
+        None => return (401, json!({"error": "missing bearer token"})),
+    };
+    match svc.renew(space, token, machine, now) {
+        Ok(new) => (200, json!({"token": new, "expires_in": crate::service::TOKEN_LIFETIME_SECS})),
+        Err(e) => error_response(&e),
+    }
+}
+
 /// Enrol a machine. Confirms the authenticator code, then returns a token bound to the machine.
 pub fn enrol<S: Store>(svc: &mut Service<S>, body: &EnrolBody, now: u64) -> (u16, Value) {
     match svc.enrol(&body.space, &body.member, &body.machine, &body.code, now) {
