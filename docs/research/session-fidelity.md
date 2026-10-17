@@ -9,7 +9,7 @@ licence. DoppelClanker reimplements the ideas in Rust and includes none of its c
 
 ## The gap in DoppelClanker today
 
-`hsconv` converts only text between harnesses. Measured on one real OpenCode session:
+`sesync-conv` converts only text between harnesses. Measured on one real OpenCode session:
 307 text parts converted, 367 tool parts skipped.
 
 | Content | from-claude | from-opencode | to-claude | to-opencode |
@@ -92,7 +92,7 @@ message, before the answer, wrapped so the next model can tell it apart:
 Fast, 18 harnesses. Costs: a Python runtime dependency again, which the Rust port removed by
 decision, and pinned harness versions it validates against.
 
-### B. Port the event model into hsconv (Rust)
+### B. Port the event model into sesync-conv (Rust)
 
 Extend the omp journal, our canonical form, to keep `toolCall` blocks, `toolResult` messages,
 `thinking` blocks and images, which omp already supports natively. Then each converter maps to

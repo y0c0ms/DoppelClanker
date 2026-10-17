@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install the harness-sync package: three binaries and the Claude hook.
+# Install the sesync package: three binaries and the Claude hook.
 #
 #   sh install.sh                     install into ~/.local (bin in ~/.local/bin)
 #   sh install.sh --prefix DIR        install under DIR
@@ -8,11 +8,11 @@
 #   sh install.sh --no-build          use already-built release binaries (CI)
 #
 # Installed:
-#   <prefix>/bin/hslock         lock: claim, release, check, sweep, hook
-#   <prefix>/bin/hsconv         converter between harness formats
-#   <prefix>/bin/harness-sync   sync daemon (--watch) and manage TUI (--tui)
-#   <prefix>/share/harness-sync/hooks/   hook files for each harness
-#   <prefix>/share/harness-sync/MANIFEST final list of what was installed
+#   <prefix>/bin/sesync-lock         lock: claim, release, check, sweep, hook
+#   <prefix>/bin/sesync-conv         converter between harness formats
+#   <prefix>/bin/sesync   sync daemon (--watch) and manage TUI (--tui)
+#   <prefix>/share/sesync/hooks/   hook files for each harness
+#   <prefix>/share/sesync/MANIFEST final list of what was installed
 #
 # Needs: cargo (Rust stable). Nothing else. No Python, no Node.
 set -eu
@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
 done
 
 BIN="$PREFIX/bin"
-SHARE="$PREFIX/share/harness-sync"
+SHARE="$PREFIX/share/sesync"
 MANIFEST="$SHARE/MANIFEST"
 
 if [ "$UNINSTALL" = 1 ]; then
@@ -49,16 +49,16 @@ if [ "$UNINSTALL" = 1 ]; then
     done < "$MANIFEST"
   fi
   rm -rf "$SHARE"
-  echo "removed harness-sync from $PREFIX"
+  echo "removed sesync from $PREFIX"
   exit 0
 fi
 
 if [ "$NOBUILD" = 0 ]; then
   command -v cargo >/dev/null 2>&1 || { echo "cargo is required (install Rust stable)" >&2; exit 1; }
   echo "== building"
-  (cd "$ROOT/lock" && cargo build --release --quiet)
-  (cd "$ROOT/hsconv" && cargo build --release --quiet)
-  (cd "$ROOT/daemon-rs" && cargo build --release --quiet)
+  (cd "$ROOT/sesync-lock" && cargo build --release --quiet)
+  (cd "$ROOT/sesync-conv" && cargo build --release --quiet)
+  (cd "$ROOT/sesync" && cargo build --release --quiet)
 else
   echo "== using existing release binaries (--no-build)"
 fi
@@ -74,9 +74,9 @@ install_file() {
 }
 
 echo "== installing to $PREFIX"
-install_file "$ROOT/lock/target/release/hslock" "$BIN/hslock"
-install_file "$ROOT/hsconv/target/release/hsconv" "$BIN/hsconv"
-install_file "$ROOT/daemon-rs/target/release/harness-sync" "$BIN/harness-sync"
+install_file "$ROOT/sesync-lock/target/release/sesync-lock" "$BIN/sesync-lock"
+install_file "$ROOT/sesync-conv/target/release/sesync-conv" "$BIN/sesync-conv"
+install_file "$ROOT/sesync/target/release/sesync" "$BIN/sesync"
 for h in "$ROOT"/hooks/*; do
   [ -f "$h" ] || continue
   install_file "$h" "$SHARE/hooks/$(basename "$h")"
@@ -88,14 +88,14 @@ if [ "$SERVICE" = 1 ]; then
   case "$(uname -s)" in
     Linux)
       if command -v systemctl >/dev/null 2>&1 && [ "$PREFIX" = "${HOME}/.local" ]; then
-        UNIT="${HOME}/.config/systemd/user/harness-sync.service"
+        UNIT="${HOME}/.config/systemd/user/sesync.service"
         mkdir -p "$(dirname "$UNIT")"
         cat > "$UNIT" <<EOF2
 [Unit]
-Description=harness-sync: keep coding-agent sessions in step across harnesses
+Description=sesync: keep coding-agent sessions in step across harnesses
 
 [Service]
-ExecStart=$BIN/harness-sync --watch
+ExecStart=$BIN/sesync --watch
 Restart=on-failure
 
 [Install]
@@ -103,13 +103,13 @@ WantedBy=default.target
 EOF2
         echo "$UNIT" >> "$MANIFEST.tmp"
         systemctl --user daemon-reload 2>/dev/null || true
-        systemctl --user enable --now harness-sync.service 2>/dev/null || echo "note: run 'systemctl --user enable --now harness-sync' to start at login"
-        printf '#!/bin/sh\nsystemctl --user disable --now harness-sync.service 2>/dev/null || true\n' > "$SHARE/service-stop"
+        systemctl --user enable --now sesync.service 2>/dev/null || echo "note: run 'systemctl --user enable --now sesync' to start at login"
+        printf '#!/bin/sh\nsystemctl --user disable --now sesync.service 2>/dev/null || true\n' > "$SHARE/service-stop"
         echo "$SHARE/service-stop" >> "$MANIFEST.tmp"
-        echo "harness-sync.service" > "$SHARE/service-id"
+        echo "sesync.service" > "$SHARE/service-id"
         echo "$SHARE/service-id" >> "$MANIFEST.tmp"
       else
-        echo "note: no login service registered. Run '$BIN/harness-sync --watch' to sync."
+        echo "note: no login service registered. Run '$BIN/sesync --watch' to sync."
       fi
       ;;
     Darwin)
@@ -123,13 +123,13 @@ EOF2
   <key>Label</key><string>com.harnesssync.watch</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$BIN/harness-sync</string>
+    <string>$BIN/sesync</string>
     <string>--watch</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${HOME}/Library/Logs/harness-sync.log</string>
-  <key>StandardErrorPath</key><string>${HOME}/Library/Logs/harness-sync.log</string>
+  <key>StandardOutPath</key><string>${HOME}/Library/Logs/sesync.log</string>
+  <key>StandardErrorPath</key><string>${HOME}/Library/Logs/sesync.log</string>
 </dict>
 </plist>
 EOF3
@@ -142,11 +142,11 @@ EOF3
       echo "$SHARE/service-id" >> "$MANIFEST.tmp"
       ;;
     *)
-      echo "note: no login service for this system. Run '$BIN/harness-sync --watch' to sync."
+      echo "note: no login service for this system. Run '$BIN/sesync --watch' to sync."
       ;;
   esac
 fi
 
 echo "$MANIFEST" >> "$MANIFEST.tmp"
 mv "$MANIFEST.tmp" "$MANIFEST"
-echo "== installed. Run: $BIN/harness-sync --once"
+echo "== installed. Run: $BIN/sesync --once"

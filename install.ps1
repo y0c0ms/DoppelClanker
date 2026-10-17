@@ -1,13 +1,13 @@
-# harness-sync per-user installer for Windows. No administrator rights are needed.
+# sesync per-user installer for Windows. No administrator rights are needed.
 #
 #   powershell -ExecutionPolicy Bypass -File install.ps1               install
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall    remove
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -NoService    install, no login start
 #
 # Writes only under the user profile and HKCU:
-#   %LOCALAPPDATA%\Programs\harness-sync\bin   the three .exe files
-#   %LOCALAPPDATA%\Programs\harness-sync\share hook files and MANIFEST.txt
-#   HKCU\Software\Microsoft\Windows\CurrentVersion\Run   login start (harness-sync)
+#   %LOCALAPPDATA%\Programs\sesync\bin   the three .exe files
+#   %LOCALAPPDATA%\Programs\sesync\share hook files and MANIFEST.txt
+#   HKCU\Software\Microsoft\Windows\CurrentVersion\Run   login start (sesync)
 #   user PATH (HKCU\Environment)                          adds the bin folder
 param(
   [switch]$Uninstall,
@@ -16,7 +16,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Prefix  = Join-Path $env:LOCALAPPDATA "Programs\harness-sync"
+$Prefix  = Join-Path $env:LOCALAPPDATA "Programs\sesync"
 $Bin     = Join-Path $Prefix "bin"
 $Share   = Join-Path $Prefix "share"
 $Manifest = Join-Path $Share "MANIFEST.txt"
@@ -46,10 +46,10 @@ if ($Uninstall) {
       if (Test-Path $_) { Remove-Item -Force $_ }
     }
   }
-  Remove-ItemProperty -Path $RunKey -Name "harness-sync" -ErrorAction SilentlyContinue
+  Remove-ItemProperty -Path $RunKey -Name "sesync" -ErrorAction SilentlyContinue
   Remove-UserPath $Bin
   if (Test-Path $Prefix) { Remove-Item -Recurse -Force $Prefix }
-  Write-Host "removed harness-sync from $Prefix"
+  Write-Host "removed sesync from $Prefix"
   exit 0
 }
 
@@ -58,9 +58,9 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 }
 
 Write-Host "== building"
-Push-Location (Join-Path $Root "lock");      cargo build --release --quiet; Pop-Location
-Push-Location (Join-Path $Root "hsconv");    cargo build --release --quiet; Pop-Location
-Push-Location (Join-Path $Root "daemon-rs"); cargo build --release --quiet; Pop-Location
+Push-Location (Join-Path $Root "sesync-lock");      cargo build --release --quiet; Pop-Location
+Push-Location (Join-Path $Root "sesync-conv");    cargo build --release --quiet; Pop-Location
+Push-Location (Join-Path $Root "sesync"); cargo build --release --quiet; Pop-Location
 
 New-Item -ItemType Directory -Force -Path $Bin, (Join-Path $Share "hooks") | Out-Null
 $recorded = @()
@@ -70,9 +70,9 @@ function Install-File([string]$src, [string]$dst) {
 }
 
 Write-Host "== installing to $Prefix"
-Install-File (Join-Path $Root "lock\target\release\hslock.exe")          (Join-Path $Bin "hslock.exe")
-Install-File (Join-Path $Root "hsconv\target\release\hsconv.exe")        (Join-Path $Bin "hsconv.exe")
-Install-File (Join-Path $Root "daemon-rs\target\release\harness-sync.exe") (Join-Path $Bin "harness-sync.exe")
+Install-File (Join-Path $Root "sesync-lock\target\release\sesync-lock.exe")          (Join-Path $Bin "sesync-lock.exe")
+Install-File (Join-Path $Root "sesync-conv\target\release\sesync-conv.exe")        (Join-Path $Bin "sesync-conv.exe")
+Install-File (Join-Path $Root "sesync\target\release\sesync.exe") (Join-Path $Bin "sesync.exe")
 Get-ChildItem (Join-Path $Root "hooks") -File | ForEach-Object {
   Install-File $_.FullName (Join-Path $Share "hooks\$($_.Name)")
 }
@@ -81,10 +81,10 @@ Add-UserPath $Bin
 
 if (-not $NoService) {
   # Login start through the per-user Run key. No scheduled task, no service, no admin.
-  $cmd = "`"$(Join-Path $Bin 'harness-sync.exe')`" --watch"
-  Set-ItemProperty -Path $RunKey -Name "harness-sync" -Value $cmd
+  $cmd = "`"$(Join-Path $Bin 'sesync.exe')`" --watch"
+  Set-ItemProperty -Path $RunKey -Name "sesync" -Value $cmd
   Write-Host "login start registered (HKCU Run)"
 }
 
 $recorded | Set-Content -Path $Manifest
-Write-Host "== installed. Run: $(Join-Path $Bin 'harness-sync.exe') --once"
+Write-Host "== installed. Run: $(Join-Path $Bin 'sesync.exe') --once"

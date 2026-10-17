@@ -29,20 +29,20 @@ jobs:
       - name: build the three binaries
         shell: bash
         run: |
-          cargo build --release --manifest-path lock/Cargo.toml
-          cargo build --release --manifest-path hsconv/Cargo.toml
-          cargo build --release --manifest-path daemon-rs/Cargo.toml
+          cargo build --release --manifest-path sesync-lock/Cargo.toml
+          cargo build --release --manifest-path sesync-conv/Cargo.toml
+          cargo build --release --manifest-path sesync/Cargo.toml
       - name: package (Windows zip for winget, tar.gz elsewhere)
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME:-dev}"
-          STAGE="harness-sync-${VERSION}-${{ matrix.target }}"
-          mkdir -p "$STAGE/bin" "$STAGE/share/harness-sync/hooks"
+          STAGE="sesync-${VERSION}-${{ matrix.target }}"
+          mkdir -p "$STAGE/bin" "$STAGE/share/sesync/hooks"
           EXT=""; [ "${{ runner.os }}" = "Windows" ] && EXT=".exe"
-          cp "lock/target/release/hslock${EXT}" "$STAGE/bin/"
-          cp "hsconv/target/release/hsconv${EXT}" "$STAGE/bin/"
-          cp "daemon-rs/target/release/harness-sync${EXT}" "$STAGE/bin/"
-          cp hooks/* "$STAGE/share/harness-sync/hooks/"
+          cp "sesync-lock/target/release/sesync-lock${EXT}" "$STAGE/bin/"
+          cp "sesync-conv/target/release/sesync-conv${EXT}" "$STAGE/bin/"
+          cp "sesync/target/release/sesync${EXT}" "$STAGE/bin/"
+          cp hooks/* "$STAGE/share/sesync/hooks/"
           cp README.md LICENSE "$STAGE/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             # winget resolves RelativeFilePath from the root of the zip, so bin\ must sit
@@ -69,7 +69,7 @@ jobs:
           merge-multiple: true
       - name: checksums
         working-directory: dist
-        run: sha256sum harness-sync-* > SHA256SUMS && cat SHA256SUMS
+        run: sha256sum sesync-* > SHA256SUMS && cat SHA256SUMS
       - name: publish release
         env:
           GH_TOKEN: ${{ github.token }}

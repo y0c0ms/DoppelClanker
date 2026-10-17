@@ -4,7 +4,7 @@ PackageVersion: <VERSION>
 PackageLocale: en-US
 Publisher: y0c0ms
 PublisherUrl: https://github.com/y0c0ms
-PackageName: harness-sync
+PackageName: sesync
 PackageUrl: https://github.com/y0c0ms/DoppelClanker
 License: MIT
 ShortDescription: Keep coding-agent sessions in step across harnesses (omp, Pi, OpenCode, Claude Code).

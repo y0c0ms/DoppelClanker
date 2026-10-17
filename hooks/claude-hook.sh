@@ -1,14 +1,14 @@
 #!/bin/sh
-# harness-sync lock hook for Claude Code. Runs under bash (Claude Code
+# sesync lock hook for Claude Code. Runs under bash (Claude Code
 # invokes command hooks through /usr/bin/bash on Windows), reads the hook
-# payload on stdin, and calls hslock with Claude's own session id. The
-# daemon's alias map turns a mirror id into its source id inside hslock.
+# payload on stdin, and calls sesync-lock with Claude's own session id. The
+# daemon's alias map turns a mirror id into its source id inside sesync-lock.
 #
 #   UserPromptSubmit  -> claim; on refusal emit {"decision":"block"} so the
 #                        prompt is not sent and the user sees who holds it.
 #   Stop / SessionEnd -> release.
 #
-# Fail open: if hslock is missing, print a notice as additionalContext and
+# Fail open: if sesync-lock is missing, print a notice as additionalContext and
 # let the prompt through. The daemon's divergence guard is the backstop.
 #
 # Claude Code exports CLAUDE_PID (its own Win32 pid) and CLAUDE_CODE_SESSION_ID
@@ -17,16 +17,16 @@
 # per-hook bash.)
 
 EVENT="$1"
-# Find the lock binary: an explicit HSLOCK, then PATH (hslock or hslock.exe), then the
-# per-user default. The installer puts hslock on PATH, so no path is hardcoded here.
-if [ -n "${HSLOCK:-}" ]; then
-  HS="$HSLOCK"
-elif command -v hslock >/dev/null 2>&1; then
-  HS="$(command -v hslock)"
-elif command -v hslock.exe >/dev/null 2>&1; then
-  HS="$(command -v hslock.exe)"
+# Find the lock binary: an explicit SESYNC_LOCK, then PATH (sesync-lock or sesync-lock.exe), then the
+# per-user default. The installer puts sesync-lock on PATH, so no path is hardcoded here.
+if [ -n "${SESYNC_LOCK:-}" ]; then
+  HS="$SESYNC_LOCK"
+elif command -v sesync-lock >/dev/null 2>&1; then
+  HS="$(command -v sesync-lock)"
+elif command -v sesync-lock.exe >/dev/null 2>&1; then
+  HS="$(command -v sesync-lock.exe)"
 else
-  HS="$HOME/bin/hslock"
+  HS="$HOME/bin/sesync-lock"
 fi
 IN=$(cat)
 SID=${CLAUDE_CODE_SESSION_ID:-$(printf '%s' "$IN" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)}
@@ -35,7 +35,7 @@ PID=${CLAUDE_PID:-$PPID}
 
 if [ ! -x "$HS" ]; then
   if [ "$EVENT" = "submit" ]; then
-    printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"harness-sync: lock binary missing (hslock is not on PATH); this turn is unprotected (cd ~/.local/share/harness-sync/lock && cargo build --release && cp target/release/hslock.exe ~/bin/)"}}\n'
+    printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"sesync: lock binary missing (sesync-lock is not on PATH); this turn is unprotected (cd ~/.local/share/sesync/lock && cargo build --release && cp target/release/sesync-lock.exe ~/bin/)"}}\n'
   fi
   exit 0
 fi
