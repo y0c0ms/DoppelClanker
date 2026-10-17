@@ -79,6 +79,8 @@ pub struct Space {
     members: BTreeSet<String>,
     keys: HashMap<u64, [u8; 32]>,
     version: u64,
+    secret: Option<Vec<u8>>,
+    token_key: Option<[u8; 32]>,
 }
 
 impl Space {
@@ -90,7 +92,27 @@ impl Space {
             members: members.iter().map(|m| m.to_string()).collect(),
             keys,
             version: 1,
+            secret: None,
+            token_key: None,
         }
+    }
+
+    /// The authenticator secret for this space, if one was set.
+    pub fn secret(&self) -> Option<&[u8]> {
+        self.secret.as_deref()
+    }
+
+    pub fn set_secret(&mut self, secret: Vec<u8>) {
+        self.secret = Some(secret);
+    }
+
+    /// The HMAC key that signs this space's caller tokens.
+    pub fn token_key(&self) -> Option<[u8; 32]> {
+        self.token_key
+    }
+
+    pub fn set_token_key(&mut self, key: [u8; 32]) {
+        self.token_key = Some(key);
     }
 
     pub fn key_version(&self) -> u64 {
@@ -137,6 +159,18 @@ impl Space {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         push_str(&mut out, &self.name);
+        match &self.secret {
+            Some(sec) => {
+                out.push(1);
+                out.extend_from_slice(&(sec.len() as u32).to_le_bytes());
+                out.extend_from_slice(sec);
+            }
+            None => out.push(0),
+        }
+        match &self.token_key {
+            Some(k) => { out.push(1); out.extend_from_slice(k); }
+            None => out.push(0),
+        }
         out.extend_from_slice(&self.version.to_le_bytes());
         out.extend_from_slice(&(self.members.len() as u32).to_le_bytes());
         for m in &self.members {
@@ -156,6 +190,23 @@ impl Space {
     pub fn from_bytes(b: &[u8]) -> Option<Space> {
         let mut c = Cursor { b, i: 0 };
         let name = c.string()?;
+        let secret = match c.take(1)?[0] {
+            0 => None,
+            1 => {
+                let n = c.u32()? as usize;
+                Some(c.take(n)?.to_vec())
+            }
+            _ => return None,
+        };
+        let token_key = match c.take(1)?[0] {
+            0 => None,
+            1 => {
+                let mut k = [0u8; 32];
+                k.copy_from_slice(c.take(32)?);
+                Some(k)
+            }
+            _ => return None,
+        };
         let version = c.u64()?;
         let n_members = c.u32()? as usize;
         let mut members = BTreeSet::new();
@@ -172,7 +223,7 @@ impl Space {
             keys.insert(v, key);
         }
         if c.i != b.len() { return None; }
-        Some(Space { name, members, keys, version })
+        Some(Space { name, members, keys, version, secret, token_key })
     }
 
     /// Confirm `member` belongs to the space, without sealing or opening anything.

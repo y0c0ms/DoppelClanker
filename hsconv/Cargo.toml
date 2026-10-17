@@ -2,6 +2,7 @@
 name = "hsconv"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "harness-sync converter: omp/Pi journal is the canonical form; project to OpenCode and Claude Code."
 
 [dependencies]
