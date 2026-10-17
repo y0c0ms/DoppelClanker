@@ -45,6 +45,16 @@ pub struct State {
     /// Subagent transcript files, keyed by the parent session id. They belong to the
     /// parent: shown under it, never synced as conversations of their own.
     pub subagents: BTreeMap<String, Vec<String>>,
+    /// Sessions the user marked for the team. Only these are eligible to push. A session is
+    /// never pushed unless it is in this set.
+    pub marked: BTreeSet<String>,
+}
+
+impl State {
+    pub fn mark(&mut self, session: &str) { self.marked.insert(session.to_string()); }
+    pub fn unmark(&mut self, session: &str) { self.marked.remove(session); }
+    pub fn is_marked(&self, session: &str) -> bool { self.marked.contains(session) }
+    pub fn marked_sessions(&self) -> Vec<String> { self.marked.iter().cloned().collect() }
 }
 
 fn invalid(e: impl std::fmt::Display) -> io::Error {
@@ -90,6 +100,14 @@ impl State {
         if let Some(keys) = raw.get("mirror_keys").and_then(Value::as_array) {
             st.mirror_keys = keys.iter().filter_map(Value::as_str).map(str::to_string).collect();
         }
+        // Marks are optional: a state file written before they existed has none.
+        if let Some(marked) = raw.get("marked").and_then(Value::as_array) {
+            for m in marked {
+                if let Some(id) = m.as_str() {
+                    st.marked.insert(id.to_string());
+                }
+            }
+        }
         Ok(st)
     }
 
@@ -110,6 +128,7 @@ impl State {
             "sources": sources,
             "mirror_keys": self.mirror_keys.iter().collect::<Vec<_>>(),
             "subagents": self.subagents,
+            "marked": self.marked.iter().collect::<Vec<_>>(),
         });
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, serde_json::to_string_pretty(&data).map_err(invalid)?)?;

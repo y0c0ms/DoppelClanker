@@ -5,6 +5,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// `<timestamp>_<uuid>.jsonl`, the omp and Pi journal name.
+/// Whether the harness will list a session file of this name. An import must only write names
+/// the harness reads, or the file would be written and never shown.
+pub fn is_listed_session_name(name: &str) -> bool {
+    parse_omp_name(name).is_some()
+}
+
 pub fn parse_omp_name(name: &str) -> Option<String> {
     let stem = name.strip_suffix(".jsonl")?;
     let (ts, id) = stem.split_once('_')?;

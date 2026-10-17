@@ -26,7 +26,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         .iter()
         .map(|g| ListItem::new(Line::from(vec![
             Span::styled(format!("{:<6}", g.fmt), Style::default().add_modifier(Modifier::DIM)),
-            Span::raw(" "),
+            // A star marks a session the user chose for the team; unmarked rows show a space.
+            Span::raw(if app.is_marked(g) { "* " } else { "  " }),
             Span::raw(g.title.clone()),
         ])))
         .collect();
@@ -34,6 +35,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let status_line = match app.mode() {
         Mode::Rename => format!("Rename: {}_", app.input()),
+        Mode::Confirm => app.status().to_string(),
         Mode::Browse => app.status().to_string(),
     };
     f.render_widget(Paragraph::new(status_line), chunks[1]);

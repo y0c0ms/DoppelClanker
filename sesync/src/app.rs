@@ -13,6 +13,8 @@ use std::time::Instant;
 pub enum Mode {
     Browse,
     Rename,
+    /// Waiting for y/n before importing the selected team session.
+    Confirm,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +34,11 @@ pub struct App {
     lock_dir: PathBuf,
     sesync_lock: PathBuf,
     groups: Vec<Group>,
+    /// Team sessions from the last pull, as (id, bytes). Shown for display; written only when
+    /// the user confirms an import.
+    team: Vec<(String, Vec<u8>)>,
+    /// Ids imported in this run, in order. Recorded so the result can be shown.
+    imported: Vec<String>,
     /// The space currently shown, if any, and the sessions last fetched for it.
     space: Option<String>,
     remote: Vec<crate::remote::SpaceSession>,
@@ -52,6 +59,8 @@ impl App {
         App {
             model: Model::new(titles),
             roots, state, lock_dir, sesync_lock, groups,
+            team: Vec::new(),
+            imported: Vec::new(),
             space: None,
             remote: Vec::new(),
             seen: std::collections::HashSet::new(),
@@ -77,6 +86,16 @@ impl App {
 
     pub fn rows(&self) -> &[Group] {
         &self.groups
+    }
+
+    /// Set the team sessions a pull returned. Display only; nothing is written by this.
+    pub fn set_team_sessions(&mut self, sessions: Vec<(String, Vec<u8>)>) {
+        self.team = sessions;
+    }
+
+    /// The team session ids imported during this run.
+    pub fn imported(&self) -> Vec<String> {
+        self.imported.clone()
     }
 
     /// Choose the space whose sessions Ctrl+R refreshes.
@@ -131,6 +150,36 @@ impl App {
         self.groups.get(self.model.selected()).cloned()
     }
 
+    /// Whether a listed group is marked for the team. The view uses this to show the mark.
+    pub fn is_marked(&self, g: &Group) -> bool {
+        self.state.is_marked(&crate::manage::session_id_of(&g.key))
+    }
+
+    /// Whether the selected session is marked for the team.
+    pub fn is_selected_marked(&self) -> bool {
+        self.selected().map_or(false, |g| self.state.is_marked(&crate::manage::session_id_of(&g.key)))
+    }
+
+    /// Toggle the team mark on the selected session. Returns the new state, or None if nothing
+    /// is selected. Only the session id is stored, never its contents.
+    pub fn toggle_mark(&mut self) -> Option<bool> {
+        let g = self.selected()?;
+        let id = crate::manage::session_id_of(&g.key);
+        let now_marked = if self.state.is_marked(&id) {
+            self.state.unmark(&id);
+            false
+        } else {
+            self.state.mark(&id);
+            true
+        };
+        self.status = if now_marked {
+            format!("marked '{}' for the team", g.title)
+        } else {
+            format!("unmarked '{}'", g.title)
+        };
+        Some(now_marked)
+    }
+
     fn reload(&mut self) {
         self.groups = manage::list_groups(&self.roots, &self.state);
         self.model = Model::new(self.groups.iter().map(|g| g.title.clone()).collect());
@@ -138,6 +187,7 @@ impl App {
 
     pub fn handle(&mut self, ev: Ev, now: Instant) {
         match self.mode {
+            Mode::Confirm => self.handle_confirm(ev),
             Mode::Rename => self.handle_rename(ev),
             Mode::Browse => self.handle_browse(ev, now),
         }
@@ -160,6 +210,17 @@ impl App {
                     self.status = format!("Press ctrl+d again to DELETE '{}'. Any other key cancels.", g.title);
                 }
             }
+            Ev::Char('i') => {
+                if self.team.is_empty() {
+                    return;
+                }
+                self.mode = Mode::Confirm;
+                self.status = "import the team session into your harness? y/n".into();
+            }
+            Ev::Char('m') => {
+                self.model.press(Key::Other, now);
+                self.toggle_mark();
+            }
             Ev::Char('r') => {
                 let Some(g) = self.selected() else { return };
                 self.model.press(Key::Other, now);
@@ -175,6 +236,38 @@ impl App {
                     self.model.press(Key::Other, now);
                     self.status = "delete cancelled".into();
                 }
+            }
+        }
+    }
+
+    /// Confirm or cancel the pending import. Only `y` writes; everything else cancels.
+    fn handle_confirm(&mut self, ev: Ev) {
+        match ev {
+            Ev::Char('y') => {
+                let first = self.team.first().cloned();
+                self.mode = Mode::Browse;
+                if let Some((id, bytes)) = first {
+                    // The harness lists only `<timestamp>_<uuid>.jsonl`. A team id that cannot
+                    // be written in that form is refused, so no file is written that nothing shows.
+                    let name = format!("{}_{}.jsonl", "2026-01-01T00-00-00-000Z", id);
+                    if !crate::discovery::is_listed_session_name(&name) {
+                        self.mode = Mode::Browse;
+                        self.status = format!("not imported: team session id {id} is not a harness session id");
+                        return;
+                    }
+                    let target = self.roots.omp.join(name);
+                    match crate::team_import::import_confirmed(&target, &bytes, true) {
+                        Ok(_) => {
+                            self.imported.push(id.clone());
+                            self.status = format!("imported team session {id}");
+                        }
+                        Err(e) => self.status = format!("not imported: {e:?}"),
+                    }
+                }
+            }
+            _ => {
+                self.mode = Mode::Browse;
+                self.status = "import cancelled".into();
             }
         }
     }
