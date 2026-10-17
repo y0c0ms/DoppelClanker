@@ -4,6 +4,8 @@
 //! the admin may sign a revocation (a list without a device).
 use sesync_team::membership::{device_entry, Device, Join, JoinError, MemberList, Verifier};
 
+const T0: u64 = 1_000_000;
+
 fn setup() -> (Device, Device, Device) {
     (Device::generate(), Device::generate(), Device::generate()) // admin, member, newcomer
 }
@@ -13,9 +15,9 @@ fn a_member_approved_join_is_admitted() {
     let (admin, member, newcomer) = setup();
     let mut v = Verifier::new(admin.public_key());
     v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
-    let join = Join::request(&newcomer).approve(&member);
+    let join = Join::request(&newcomer).approve(&member, T0);
     v.admit(&join).expect("a member's approval admits the device");
-    assert!(v.is_member(&newcomer.public_key()));
+    assert!(v.is_member_at(&newcomer.public_key(), T0 + 60), "admitted inside the window");
 }
 
 #[test]
@@ -34,7 +36,7 @@ fn an_approval_from_a_non_member_is_refused() {
     let outsider = Device::generate();
     let mut v = Verifier::new(admin.public_key());
     v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
-    let join = Join::request(&newcomer).approve(&outsider);
+    let join = Join::request(&newcomer).approve(&outsider, T0);
     assert_eq!(v.admit(&join), Err(JoinError::ApproverNotMember));
 }
 
@@ -45,7 +47,7 @@ fn an_approval_cannot_be_moved_to_another_device() {
     let mut v = Verifier::new(admin.public_key());
     v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
     // The member approved `newcomer`; swapping in `other` must not pass.
-    let mut join = Join::request(&newcomer).approve(&member);
+    let mut join = Join::request(&newcomer).approve(&member, T0);
     join.request = Join::request(&other).request;
     assert_eq!(v.admit(&join), Err(JoinError::BadApproval));
     assert!(!v.is_member(&other.public_key()));
@@ -57,7 +59,7 @@ fn a_member_cannot_approve_a_revocation_by_admitting_nobody() {
     let (admin, member, newcomer) = setup();
     let mut v = Verifier::new(admin.public_key());
     v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
-    v.admit(&Join::request(&newcomer).approve(&member)).unwrap();
+    v.admit(&Join::request(&newcomer).approve(&member, T0)).unwrap();
     assert!(v.is_member(&admin.public_key()) && v.is_member(&member.public_key()),
         "admitting a device leaves every existing member in place");
 }

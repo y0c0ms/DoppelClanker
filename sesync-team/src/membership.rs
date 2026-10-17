@@ -176,11 +176,12 @@ pub enum MembershipError {
 pub struct Verifier {
     admin: Vec<u8>,
     current: Option<MemberList>,
+    pending: Vec<Pending>,
 }
 
 impl Verifier {
     pub fn new(admin_public: Vec<u8>) -> Verifier {
-        Verifier { admin: admin_public, current: None }
+        Verifier { admin: admin_public, current: None, pending: Vec::new() }
     }
 
     pub fn accept(&mut self, signed: &SignedList) -> Result<(), MembershipError> {
@@ -192,6 +193,9 @@ impl Verifier {
                 return Err(MembershipError::Stale { have: cur.version, got: signed.list.version });
             }
         }
+        // A device the admin now lists is confirmed: its join no longer runs on a timer.
+        let listed: Vec<Vec<u8>> = signed.list.devices.clone();
+        self.pending.retain(|p| !listed.iter().any(|e| e == &p.entry));
         self.current = Some(signed.list.clone());
         Ok(())
     }
@@ -216,13 +220,19 @@ impl Verifier {
     }
 }
 
+/// How long an approved join stands before it expires, unless the admin's signed list includes
+/// the device first. Ten minutes: a join is a short hand-over, not a standing grant.
+pub const JOIN_WINDOW_SECS: u64 = 10 * 60;
+
 /// A new device asks to join: its entry (signing and box keys), and, once a member approves, the
-/// approver's signature over that exact entry.
+/// approver's signature over the entry and the approval time.
 #[derive(Clone, Debug)]
 pub struct Join {
     pub request: Vec<u8>,
     pub approver: Option<Vec<u8>>,
     pub approval: Option<Vec<u8>>,
+    /// When the approval was made. The join is valid for JOIN_WINDOW_SECS from here.
+    pub approved_at: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -231,54 +241,80 @@ pub enum JoinError {
     NotApproved,
     /// The approver is not in the current member list.
     ApproverNotMember,
-    /// The approval does not verify over this request.
+    /// The approval does not verify over this request and time.
     BadApproval,
+    /// The join window has passed.
+    Expired,
 }
 
 impl Join {
     /// A device asks to join. The request is its own entry, not signed yet.
     pub fn request(device: &Device) -> Join {
-        Join { request: device_entry(device), approver: None, approval: None }
+        Join { request: device_entry(device), approver: None, approval: None, approved_at: None }
     }
 
-    /// A current member approves this exact request. The approval signs the request bytes.
-    pub fn approve(mut self, member: &Device) -> Join {
-        let approval = member.sign(&join_message(&self.request));
+    /// A current member approves this exact request at `now`. The approval signs the request and
+    /// the time, so neither can be changed.
+    pub fn approve(mut self, member: &Device, now: u64) -> Join {
+        let approval = member.sign(&join_message(&self.request, now));
         self.approver = Some(member.public_key());
         self.approval = Some(approval);
+        self.approved_at = Some(now);
         self
     }
 }
 
-/// What a member signs when it approves: a fixed label and the request entry.
-fn join_message(request: &[u8]) -> Vec<u8> {
+/// What a member signs when it approves: a fixed label, the request entry and the approval time.
+fn join_message(request: &[u8], at: u64) -> Vec<u8> {
     let mut m = b"sesync join v1".to_vec();
+    m.extend_from_slice(&at.to_be_bytes());
     m.extend_from_slice(request);
     m
 }
 
 impl Verifier {
-    /// Admit a device if a current member approved its request. A join never removes anyone.
-    pub fn admit(&mut self, join: &Join) -> Result<(), JoinError> {
-        let (approver, approval) = match (&join.approver, &join.approval) {
-            (Some(a), Some(s)) => (a, s),
+    /// Admit a device if a current member approved its request within the join window at `now`.
+    /// A join never removes anyone. An admitted join lapses after JOIN_WINDOW_SECS unless the
+    /// admin's signed list includes the device, which confirms it.
+    pub fn admit_at(&mut self, join: &Join, now: u64) -> Result<(), JoinError> {
+        let (approver, approval, at) = match (&join.approver, &join.approval, join.approved_at) {
+            (Some(a), Some(s), Some(t)) => (a, s, t),
             _ => return Err(JoinError::NotApproved),
         };
+        if now >= at + JOIN_WINDOW_SECS {
+            return Err(JoinError::Expired);
+        }
         if !self.is_member(approver) {
             return Err(JoinError::ApproverNotMember);
         }
-        if !Device::verify(approver, &join_message(&join.request), approval) {
+        if !Device::verify(approver, &join_message(&join.request, at), approval) {
             return Err(JoinError::BadApproval);
         }
-        let mut list = self.current.clone().ok_or(JoinError::ApproverNotMember)?;
-        if !list.devices.iter().any(|e| e == &join.request) {
-            list.devices.push(join.request.clone());
-        }
-        list.version += 1;
-        // The admitted list is re-signed by the verifier's own record: the join is carried in the
-        // approval, and the new version is recorded locally. The admin's signature is still
-        // required for any list the rest of the space trusts; see the design.
-        self.current = Some(list);
+        self.pending.push(Pending { entry: join.request.clone(), expires_at: at + JOIN_WINDOW_SECS });
         Ok(())
     }
+
+    /// Admit with no clock: kept for callers that check the window themselves.
+    pub fn admit(&mut self, join: &Join) -> Result<(), JoinError> {
+        let at = join.approved_at.ok_or(JoinError::NotApproved)?;
+        self.admit_at(join, at)
+    }
+
+    /// Whether a device is a member at `now`: listed by the admin, or admitted by a join still in
+    /// its window. A join confirmed by the admin's list stops being time-limited.
+    pub fn is_member_at(&self, device_public: &[u8], now: u64) -> bool {
+        if self.is_member(device_public) {
+            return true;
+        }
+        self.pending.iter().any(|p| {
+            p.entry.len() >= 32 && &p.entry[..32] == device_public && now < p.expires_at
+        })
+    }
+}
+
+/// A join admitted by a member, waiting for the admin to confirm it in a signed list.
+#[derive(Clone, Debug)]
+struct Pending {
+    entry: Vec<u8>,
+    expires_at: u64,
 }
