@@ -129,3 +129,29 @@ impl JoinGate {
         Err(JoinError::Wrong)
     }
 }
+
+/// RFC 4648 base32 (no padding), the encoding authenticator apps expect for a TOTP secret.
+pub fn base32(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::new();
+    let (mut buf, mut bits) = (0u32, 0u32);
+    for &b in bytes {
+        buf = (buf << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buf >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buf << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    out
+}
+
+/// The otpauth URI an authenticator app imports: a 30-second, 6-digit, SHA-1 TOTP for the
+/// space. Shown once at creation; the label carries the space name, never the secret.
+pub fn otpauth_uri(secret: &[u8], space: &str) -> String {
+    format!("otpauth://totp/sesync:{space}?secret={}&issuer=sesync&algorithm=SHA1&digits=6&period=30",
+            base32(secret))
+}

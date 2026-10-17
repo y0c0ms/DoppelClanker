@@ -12,7 +12,7 @@ async fn start() -> (String, Arc<AppState<MemoryStore>>, tokio::task::JoinHandle
     let mut svc = Service::new(MemoryStore::default());
     svc.create_space("team-a", &["alice"]).unwrap();
     let clock: Clock = Arc::new(|| T0 + 1);
-    let state = Arc::new(AppState { service: Mutex::new(svc), clock, metrics: Default::default() });
+    let state = Arc::new(AppState { service: Mutex::new(svc), clock, metrics: Default::default(), admin_token: None });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = server::router(state.clone());

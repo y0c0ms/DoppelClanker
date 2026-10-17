@@ -426,6 +426,10 @@ fn sweep_stale_locks(env: &Env) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Team admin commands do not touch the session state, so they run before it is loaded.
+    if args.first().map(String::as_str) == Some("team") {
+        std::process::exit(run_team(&args[1..]));
+    }
     let env = Env::from_env();
     let _ = std::fs::create_dir_all(&env.state_dir);
     let mut state = match State::load(&env.state_file()) {
@@ -545,5 +549,31 @@ fn run_tui(roots: sesync::manage::Roots, state: State, lock_dir: PathBuf, sesync
         if app.should_quit() {
             return Ok(());
         }
+    }
+}
+
+/// `sesync team ...`: parse, read the admin token from its file, and call the team server.
+/// Exit 0 on success, 2 on a usage mistake, 1 on a server or token error.
+fn run_team(args: &[String]) -> i32 {
+    use sesync::team_cli::{parse, read_admin_token, run};
+    let cmd = match parse(args) {
+        Ok(c) => c,
+        Err(msg) => { eprintln!("{msg}"); return 2; }
+    };
+    let base = match std::env::var("SESYNC_TEAM_URL") {
+        Ok(u) => u,
+        Err(_) => { eprintln!("set SESYNC_TEAM_URL to the team server address"); return 2; }
+    };
+    let token_file = match std::env::var("SESYNC_ADMIN_TOKEN_FILE") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => { eprintln!("set SESYNC_ADMIN_TOKEN_FILE to the admin token file"); return 2; }
+    };
+    let token = match read_admin_token(&token_file) {
+        Ok(t) => t,
+        Err(msg) => { eprintln!("{msg}"); return 1; }
+    };
+    match run(&cmd, &base, &token) {
+        Ok(text) => { println!("{text}"); 0 }
+        Err(msg) => { eprintln!("sesync team: {msg}"); 1 }
     }
 }

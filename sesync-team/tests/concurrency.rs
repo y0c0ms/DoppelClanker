@@ -17,7 +17,7 @@ fn make_app() -> (axum::Router, Arc<AppState<MemoryStore>>) {
     let mut svc = Service::new(MemoryStore::default());
     svc.create_space("team-a", &["alice", "bob"]).unwrap();
     let clock: Clock = Arc::new(|| T0 + 1);
-    let state = Arc::new(AppState { service: Mutex::new(svc), clock, metrics: Default::default() });
+    let state = Arc::new(AppState { service: Mutex::new(svc), clock, metrics: Default::default(), admin_token: None });
     (server::router(state.clone()), state)
 }
 
