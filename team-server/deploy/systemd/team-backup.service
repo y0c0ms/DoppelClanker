@@ -1,0 +1,10 @@
+# Daily encrypted backup of the team database. Generic: all host-specific values come from
+# the environment file named below, which lives on the host and is not in git.
+[Unit]
+Description=Encrypted backup of the team database (public-key, no secret needed)
+OnFailure=team-backup-failed.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/team-backup/env
+ExecStart=/bin/sh %h/.config/team-backup/backup-team-db-pk.sh "${TEAM_DUMP_CMD}" "${TEAM_BACKUP_FPR}" "${TEAM_BACKUP_PUBKEY}" "${TEAM_BACKUP_DIR}" "${TEAM_BACKUP_KEEP}"
