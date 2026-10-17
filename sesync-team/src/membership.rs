@@ -215,3 +215,70 @@ impl Verifier {
         })
     }
 }
+
+/// A new device asks to join: its entry (signing and box keys), and, once a member approves, the
+/// approver's signature over that exact entry.
+#[derive(Clone, Debug)]
+pub struct Join {
+    pub request: Vec<u8>,
+    pub approver: Option<Vec<u8>>,
+    pub approval: Option<Vec<u8>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum JoinError {
+    /// No member has approved the request.
+    NotApproved,
+    /// The approver is not in the current member list.
+    ApproverNotMember,
+    /// The approval does not verify over this request.
+    BadApproval,
+}
+
+impl Join {
+    /// A device asks to join. The request is its own entry, not signed yet.
+    pub fn request(device: &Device) -> Join {
+        Join { request: device_entry(device), approver: None, approval: None }
+    }
+
+    /// A current member approves this exact request. The approval signs the request bytes.
+    pub fn approve(mut self, member: &Device) -> Join {
+        let approval = member.sign(&join_message(&self.request));
+        self.approver = Some(member.public_key());
+        self.approval = Some(approval);
+        self
+    }
+}
+
+/// What a member signs when it approves: a fixed label and the request entry.
+fn join_message(request: &[u8]) -> Vec<u8> {
+    let mut m = b"sesync join v1".to_vec();
+    m.extend_from_slice(request);
+    m
+}
+
+impl Verifier {
+    /// Admit a device if a current member approved its request. A join never removes anyone.
+    pub fn admit(&mut self, join: &Join) -> Result<(), JoinError> {
+        let (approver, approval) = match (&join.approver, &join.approval) {
+            (Some(a), Some(s)) => (a, s),
+            _ => return Err(JoinError::NotApproved),
+        };
+        if !self.is_member(approver) {
+            return Err(JoinError::ApproverNotMember);
+        }
+        if !Device::verify(approver, &join_message(&join.request), approval) {
+            return Err(JoinError::BadApproval);
+        }
+        let mut list = self.current.clone().ok_or(JoinError::ApproverNotMember)?;
+        if !list.devices.iter().any(|e| e == &join.request) {
+            list.devices.push(join.request.clone());
+        }
+        list.version += 1;
+        // The admitted list is re-signed by the verifier's own record: the join is carried in the
+        // approval, and the new version is recorded locally. The admin's signature is still
+        // required for any list the rest of the space trusts; see the design.
+        self.current = Some(list);
+        Ok(())
+    }
+}

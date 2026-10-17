@@ -1,0 +1,63 @@
+//! Join approval. A new device joins only when a current member signs its approval. The
+//! approval names the new device's entry, so a member cannot approve one device and have a
+//! different one admitted. Joins are not revocations: any member may approve a join, but only
+//! the admin may sign a revocation (a list without a device).
+use sesync_team::membership::{device_entry, Device, Join, JoinError, MemberList, Verifier};
+
+fn setup() -> (Device, Device, Device) {
+    (Device::generate(), Device::generate(), Device::generate()) // admin, member, newcomer
+}
+
+#[test]
+fn a_member_approved_join_is_admitted() {
+    let (admin, member, newcomer) = setup();
+    let mut v = Verifier::new(admin.public_key());
+    v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
+    let join = Join::request(&newcomer).approve(&member);
+    v.admit(&join).expect("a member's approval admits the device");
+    assert!(v.is_member(&newcomer.public_key()));
+}
+
+#[test]
+fn a_join_nobody_approved_is_refused() {
+    let (admin, member, newcomer) = setup();
+    let mut v = Verifier::new(admin.public_key());
+    v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
+    let unapproved = Join::request(&newcomer);
+    assert_eq!(v.admit(&unapproved), Err(JoinError::NotApproved));
+    assert!(!v.is_member(&newcomer.public_key()));
+}
+
+#[test]
+fn an_approval_from_a_non_member_is_refused() {
+    let (admin, member, newcomer) = setup();
+    let outsider = Device::generate();
+    let mut v = Verifier::new(admin.public_key());
+    v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
+    let join = Join::request(&newcomer).approve(&outsider);
+    assert_eq!(v.admit(&join), Err(JoinError::ApproverNotMember));
+}
+
+#[test]
+fn an_approval_cannot_be_moved_to_another_device() {
+    let (admin, member, newcomer) = setup();
+    let other = Device::generate();
+    let mut v = Verifier::new(admin.public_key());
+    v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
+    // The member approved `newcomer`; swapping in `other` must not pass.
+    let mut join = Join::request(&newcomer).approve(&member);
+    join.request = Join::request(&other).request;
+    assert_eq!(v.admit(&join), Err(JoinError::BadApproval));
+    assert!(!v.is_member(&other.public_key()));
+}
+
+#[test]
+fn a_member_cannot_approve_a_revocation_by_admitting_nobody() {
+    // Approving a join does not change who is listed as revoked: a join never removes a device.
+    let (admin, member, newcomer) = setup();
+    let mut v = Verifier::new(admin.public_key());
+    v.accept(&MemberList::new(1, vec![device_entry(&admin), device_entry(&member)]).sign(&admin)).unwrap();
+    v.admit(&Join::request(&newcomer).approve(&member)).unwrap();
+    assert!(v.is_member(&admin.public_key()) && v.is_member(&member.public_key()),
+        "admitting a device leaves every existing member in place");
+}
