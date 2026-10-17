@@ -556,6 +556,12 @@ fn run_tui(roots: sesync::manage::Roots, state: State, lock_dir: PathBuf, sesync
 /// Exit 0 on success, 2 on a usage mistake, 1 on a server or token error.
 fn run_team(args: &[String]) -> i32 {
     use sesync::team_cli::{parse, read_admin_token, run};
+    if args.first().map(String::as_str) == Some("join") {
+        return run_join(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("renew") {
+        return run_renew(&args[1..]);
+    }
     let cmd = match parse(args) {
         Ok(c) => c,
         Err(msg) => { eprintln!("{msg}"); return 2; }
@@ -575,5 +581,64 @@ fn run_team(args: &[String]) -> i32 {
     match run(&cmd, &base, &token) {
         Ok(text) => { println!("{text}"); 0 }
         Err(msg) => { eprintln!("sesync team: {msg}"); 1 }
+    }
+}
+
+/// `sesync team join <name> --member <m>`: asks for the 6-digit code, enrols this machine and
+/// stores the token owner-only. Settings: SESYNC_TEAM_URL and SESYNC_CONFIG_DIR (optional).
+fn run_join(args: &[String]) -> i32 {
+    use sesync::team_join::join;
+    let usage = "usage: sesync team join <name> --member <m>";
+    let name = match args.first().filter(|n| !n.starts_with("--")) {
+        Some(n) => n.clone(),
+        None => { eprintln!("{usage}"); return 2; }
+    };
+    let member = match args.iter().position(|a| a == "--member").and_then(|i| args.get(i + 1)) {
+        Some(m) => m.clone(),
+        None => { eprintln!("{usage}"); return 2; }
+    };
+    let base = match std::env::var("SESYNC_TEAM_URL") {
+        Ok(u) => u,
+        Err(_) => { eprintln!("set SESYNC_TEAM_URL to the team server address"); return 2; }
+    };
+    let config = std::env::var("SESYNC_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        home.join(".config").join("sesync")
+    });
+    let machine = std::env::var("SESYNC_MACHINE").unwrap_or_else(|_| {
+        std::process::Command::new("hostname").output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|| "machine".into())
+    });
+    eprint!("authenticator code (6 digits): ");
+    let mut code = String::new();
+    if std::io::stdin().read_line(&mut code).is_err() {
+        eprintln!("no code read");
+        return 1;
+    }
+    match join(&base, &name, &member, &machine, code.trim(), &config) {
+        Ok(path) => { println!("joined team '{name}' as '{member}'. Credential saved to {}", path.display()); 0 }
+        Err(msg) => { eprintln!("sesync team join: {msg}"); 1 }
+    }
+}
+
+/// `sesync team renew <name>`: renews the stored member token while its enrolment is within
+/// the 7-day window. After the window the code is needed again, via `sesync team join`.
+fn run_renew(args: &[String]) -> i32 {
+    use sesync::team_join::renew;
+    let name = match args.first() {
+        Some(n) => n.clone(),
+        None => { eprintln!("usage: sesync team renew <name>"); return 2; }
+    };
+    let base = match std::env::var("SESYNC_TEAM_URL") {
+        Ok(u) => u,
+        Err(_) => { eprintln!("set SESYNC_TEAM_URL to the team server address"); return 2; }
+    };
+    let config = std::env::var("SESYNC_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        home.join(".config").join("sesync")
+    });
+    match renew(&base, &config, &name) {
+        Ok(()) => { println!("renewed team '{name}'."); 0 }
+        Err(msg) => { eprintln!("sesync team renew: {msg}"); 1 }
     }
 }
