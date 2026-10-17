@@ -16,11 +16,11 @@ Installers:
     Scope: user
     NestedInstallerType: portable
     NestedInstallerFiles:
-      - RelativeFilePath: bin\harness-sync.exe
-        PortableCommandAlias: harness-sync
-      - RelativeFilePath: bin\hsconv.exe
-        PortableCommandAlias: hsconv
-      - RelativeFilePath: bin\hslock.exe
-        PortableCommandAlias: hslock
+      - RelativeFilePath: bin\sesync.exe
+        PortableCommandAlias: sesync
+      - RelativeFilePath: bin\sesync-conv.exe
+        PortableCommandAlias: sesync-conv
+      - RelativeFilePath: bin\sesync-lock.exe
+        PortableCommandAlias: sesync-lock
 ManifestType: installer
 ManifestVersion: 1.10.0

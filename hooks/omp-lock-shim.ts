@@ -1,7 +1,7 @@
-// omp extension: forwards turn events to the hslock hook. No logic lives here; the rules are in lock/src/main.rs (hook).
+// omp extension: forwards turn events to the sesync-lock hook. No logic lives here; the rules are in sesync-lock/src/main.rs (hook).
 import { spawnSync } from "node:child_process";
 export default function (pi: any): void {
-  const hs = process.env.HSLOCK ?? "hslock";
+  const hs = process.env.SESYNC_LOCK ?? "sesync-lock";
   const id = (ctx: any): string => {
     const file: string = ctx?.sessionManager?.getSessionFile?.() ?? "";
     return file.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1] ?? "";

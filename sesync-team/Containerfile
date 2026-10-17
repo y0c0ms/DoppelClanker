@@ -1,0 +1,20 @@
+# Team server image. Build from the repository root:
+#   podman build -f sesync-team/Containerfile -t team-server:<tag> .
+# The build stage compiles with the toolchain the lockfile requires (rust-version in
+# Cargo.toml); the runtime stage holds only the binary, CA certificates and a non-root user.
+
+FROM docker.io/library/rust:1.98-bookworm AS build
+WORKDIR /src
+COPY sesync-team/ ./sesync-team/
+WORKDIR /src/team-server
+RUN cargo build --release --locked --bin team-server
+
+FROM docker.io/library/debian:bookworm-slim
+RUN useradd --system --uid 10001 team \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/sesync-team/target/release/team-server /usr/local/bin/team-server
+USER 10001
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/team-server"]

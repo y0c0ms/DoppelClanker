@@ -1,19 +1,19 @@
 #!/bin/sh
 # Build and test everything the sync contract depends on. No Python on the build path.
-# 1. hslock compiles and its Rust tests pass.
-# 2. hsconv compiles and its Rust tests pass.
-# 3. The harness-sync daemon (daemon-rs) compiles and its tests pass, including the
-#    end-to-end tests that run the real hsconv, opencode and claude CLIs in a sandbox.
+# 1. sesync-lock compiles and its Rust tests pass.
+# 2. sesync-conv compiles and its Rust tests pass.
+# 3. The sesync daemon (daemon-rs) compiles and its tests pass, including the
+#    end-to-end tests that run the real sesync-conv, opencode and claude CLIs in a sandbox.
 set -e
 ROOT=$(cd "$(dirname "$0")" && pwd)
 echo "== lock: build + tests"
-(cd "$ROOT/lock" && cargo test --quiet)
-echo "== hsconv: build + tests"
-(cd "$ROOT/hsconv" && cargo test --release --quiet && cargo build --release --quiet)
+(cd "$ROOT/sesync-lock" && cargo test --quiet)
+echo "== sesync-conv: build + tests"
+(cd "$ROOT/sesync-conv" && cargo test --release --quiet && cargo build --release --quiet)
 echo "== daemon-rs: build + tests"
-(cd "$ROOT/daemon-rs" && cargo build --quiet && cargo test --quiet)
+(cd "$ROOT/sesync" && cargo build --quiet && cargo test --quiet)
 echo "== team-server: build + tests"
-(cd "$ROOT/team-server" && cargo test --quiet)
+(cd "$ROOT/sesync-team" && cargo test --quiet)
 echo "== no python on the build path"
 # Check only command lines: skip comments and echo text. A python3 invocation
 # would start with the command word, not inside a string.
