@@ -132,7 +132,8 @@ fn session_title(path: &str, fmt: &str) -> String {
 
 /// The session id a source file belongs to: the uuid in its name (omp/Pi or Claude), or
 /// the file stem for anything else. Subagent lists are keyed by this id.
-fn session_id_of(key: &str) -> String {
+/// The session id a group is marked and pushed under. Shared so every part names a session the same way.
+pub fn session_id_of(key: &str) -> String {
     let name = file_name(key);
     let stem = name.strip_suffix(".jsonl").unwrap_or(&name);
     if let Some((_, id)) = stem.rsplit_once('_') {

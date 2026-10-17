@@ -131,6 +131,36 @@ impl App {
         self.groups.get(self.model.selected()).cloned()
     }
 
+    /// Whether a listed group is marked for the team. The view uses this to show the mark.
+    pub fn is_marked(&self, g: &Group) -> bool {
+        self.state.is_marked(&crate::manage::session_id_of(&g.key))
+    }
+
+    /// Whether the selected session is marked for the team.
+    pub fn is_selected_marked(&self) -> bool {
+        self.selected().map_or(false, |g| self.state.is_marked(&crate::manage::session_id_of(&g.key)))
+    }
+
+    /// Toggle the team mark on the selected session. Returns the new state, or None if nothing
+    /// is selected. Only the session id is stored, never its contents.
+    pub fn toggle_mark(&mut self) -> Option<bool> {
+        let g = self.selected()?;
+        let id = crate::manage::session_id_of(&g.key);
+        let now_marked = if self.state.is_marked(&id) {
+            self.state.unmark(&id);
+            false
+        } else {
+            self.state.mark(&id);
+            true
+        };
+        self.status = if now_marked {
+            format!("marked '{}' for the team", g.title)
+        } else {
+            format!("unmarked '{}'", g.title)
+        };
+        Some(now_marked)
+    }
+
     fn reload(&mut self) {
         self.groups = manage::list_groups(&self.roots, &self.state);
         self.model = Model::new(self.groups.iter().map(|g| g.title.clone()).collect());
@@ -159,6 +189,10 @@ impl App {
                 } else {
                     self.status = format!("Press ctrl+d again to DELETE '{}'. Any other key cancels.", g.title);
                 }
+            }
+            Ev::Char('m') => {
+                self.model.press(Key::Other, now);
+                self.toggle_mark();
             }
             Ev::Char('r') => {
                 let Some(g) = self.selected() else { return };

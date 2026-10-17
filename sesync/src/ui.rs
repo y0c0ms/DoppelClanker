@@ -26,7 +26,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         .iter()
         .map(|g| ListItem::new(Line::from(vec![
             Span::styled(format!("{:<6}", g.fmt), Style::default().add_modifier(Modifier::DIM)),
-            Span::raw(" "),
+            // A star marks a session the user chose for the team; unmarked rows show a space.
+            Span::raw(if app.is_marked(g) { "* " } else { "  " }),
             Span::raw(g.title.clone()),
         ])))
         .collect();
