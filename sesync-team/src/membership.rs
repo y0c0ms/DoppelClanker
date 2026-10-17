@@ -8,10 +8,12 @@
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 
-/// A device's signing key. Created on the device and kept there.
+/// A device's keys: an Ed25519 signing key (for records and lists) and an X25519 box key (for
+/// receiving wrapped session keys). Both private keys stay on the device.
 pub struct Device {
     pair: Ed25519KeyPair,
     pkcs8: Vec<u8>,
+    box_secret: crypto_box::SecretKey,
 }
 
 impl Device {
@@ -19,14 +21,31 @@ impl Device {
         let rng = SystemRandom::new();
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("system randomness is available");
         let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("a fresh key parses");
-        Device { pair, pkcs8: pkcs8.as_ref().to_vec() }
+        let box_secret = crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+        Device { pair, pkcs8: pkcs8.as_ref().to_vec(), box_secret }
     }
 
-    /// Rebuild a device from its stored private key (PKCS#8).
-    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Device, MembershipError> {
-        let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| MembershipError::BadKey)?;
-        Ok(Device { pair, pkcs8: pkcs8.to_vec() })
+    /// The X25519 public key others wrap session keys to.
+    pub fn box_public(&self) -> Vec<u8> { self.box_secret.public_key().as_bytes().to_vec() }
+
+    pub(crate) fn box_secret(&self) -> &crypto_box::SecretKey { &self.box_secret }
+
+    /// The X25519 public key others wrap session keys to.
+
+    /// The device's agreement private key, taken once to agree a wrapped key.
+    pub(crate) fn agreement_private(&self) -> ring::agreement::EphemeralPrivateKey {
+        // Re-derive from the stored seed is not possible for an ephemeral key, so the device keeps
+        // its agreement private key in a form that can be used for each unwrap.
+        unimplemented!("see agreement_key")
     }
+
+    /// Rebuild a device from its stored signing key and box key. Both are stored on the device.
+    pub fn from_keys(pkcs8: &[u8], box_secret: [u8; 32]) -> Result<Device, MembershipError> {
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| MembershipError::BadKey)?;
+        Ok(Device { pair, pkcs8: pkcs8.to_vec(), box_secret: crypto_box::SecretKey::from(box_secret) })
+    }
+
+    pub fn box_secret_bytes(&self) -> [u8; 32] { self.box_secret.to_bytes() }
 
     pub fn private_pkcs8(&self) -> &[u8] { &self.pkcs8 }
 
