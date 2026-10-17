@@ -62,10 +62,20 @@ impl Device {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberList {
     pub version: u64,
+    /// Each entry is a device's signing public key followed by its box public key, both
+    /// covered by the admin's signature, so the list is the one source of who may read.
     pub devices: Vec<Vec<u8>>,
 }
 
+/// One device entry: signing key and box key, concatenated. Both are 32 bytes.
+pub fn device_entry(d: &Device) -> Vec<u8> {
+    let mut e = d.public_key();
+    e.extend_from_slice(&d.box_public());
+    e
+}
+
 impl MemberList {
+    /// Build a list from device entries (see `device_entry`).
     pub fn new(version: u64, devices: Vec<Vec<u8>>) -> MemberList {
         let mut devices = devices;
         devices.sort();
@@ -186,7 +196,22 @@ impl Verifier {
         Ok(())
     }
 
+    /// The version and member keys of the list currently held, if any.
+    pub fn current_view(&self) -> Option<(u64, Vec<Vec<u8>>)> {
+        self.current.as_ref().map(|l| (l.version, l.devices.clone()))
+    }
+
+    /// The box public keys of the devices in the current list: who a new session is wrapped to.
+    pub fn box_keys(&self) -> Vec<Vec<u8>> {
+        self.current.as_ref().map_or(Vec::new(), |l| {
+            l.devices.iter().filter(|e| e.len() == 64).map(|e| e[32..].to_vec()).collect()
+        })
+    }
+
+    /// Whether a device is listed, matched by its signing key (the first half of its entry).
     pub fn is_member(&self, device_public: &[u8]) -> bool {
-        self.current.as_ref().map_or(false, |l| l.devices.iter().any(|d| d == device_public))
+        self.current.as_ref().map_or(false, |l| {
+            l.devices.iter().any(|e| e.len() >= 32 && &e[..32] == device_public)
+        })
     }
 }
