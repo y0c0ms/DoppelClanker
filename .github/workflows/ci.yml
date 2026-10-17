@@ -51,7 +51,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: run the Postgres tests, which must not skip
-        working-directory: team-server
+        working-directory: sesync-team
         env:
           TEAM_TEST_PG: postgres://postgres:ci-only-throwaway@127.0.0.1:5432/postgres
           TEAM_REQUIRE_PG: "1"
