@@ -12,6 +12,8 @@ use std::collections::HashMap;
 pub enum ServiceError {
     /// The store could not answer. Not a judgement on the request: retry later.
     Unavailable,
+    /// The request conflicts with what exists, such as creating a team that already exists.
+    Conflict(String),
     NoSpace(String),
     NotMember(String),
     Auth(String),
@@ -116,7 +118,12 @@ impl<S: Store> Service<S> {
         Service { store, leases: LeaseTable::default() }
     }
 
+    /// Create a space. Refused if it already exists: replacing one would replace its secret and
+    /// content keys, which would lock every member out of their data.
     pub fn create_space(&mut self, name: &str, members: &[&str]) -> Result<(), ServiceError> {
+        if self.store.load_space(name).is_some() {
+            return Err(ServiceError::Conflict(format!("team '{name}' already exists")));
+        }
         // A random 160-bit secret per space, stored with the space so it is wrapped at rest.
         let mut secret = vec![0u8; 20];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
@@ -127,6 +134,19 @@ impl<S: Store> Service<S> {
         space.set_token_key(tk);
         self.store.save_space(space);
         Ok(())
+    }
+
+    /// Add a member to an existing space. Inviting someone already in it does nothing.
+    pub fn invite(&mut self, space: &str, who: &str) -> Result<(), ServiceError> {
+        let mut s = self.store.load_space(space).ok_or_else(|| ServiceError::NoSpace(space.into()))?;
+        s.add_member(who);
+        self.store.save_space(s);
+        Ok(())
+    }
+
+    /// Whether `who` is a member of `space`.
+    pub fn is_member(&self, space: &str, who: &str) -> bool {
+        self.member(space, who).is_ok()
     }
 
     /// The space's authenticator secret, for enrolling the authenticator app. Only the

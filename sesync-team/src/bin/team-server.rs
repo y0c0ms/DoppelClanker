@@ -54,8 +54,15 @@ fn main() {
         std::process::exit(1);
     }
     log("info", "started", &[("bind", bind.clone())]);
+    // The admin token is optional. Without a file, the admin routes refuse every request.
+    let admin_token = std::env::var("TEAM_ADMIN_TOKEN_FILE").ok().and_then(|path| {
+        std::fs::read_to_string(&path).ok().map(|t| t.trim().to_string()).filter(|t| t.len() >= 32)
+    });
+    if admin_token.is_none() {
+        log("warn", "admin_disabled", &[("reason", "TEAM_ADMIN_TOKEN_FILE unset, unreadable, or shorter than 32 chars".into())]);
+    }
     let state = Arc::new(AppState { service: Mutex::new(Service::new(store)), clock: server::system_clock(),
-                                    metrics: Default::default() });
+                                    metrics: Default::default(), admin_token });
     tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime")
         .block_on(async move {
             let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");

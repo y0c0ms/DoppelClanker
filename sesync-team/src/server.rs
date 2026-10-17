@@ -26,6 +26,69 @@ pub struct AppState<S: Store + Send + 'static> {
     pub service: Mutex<Service<S>>,
     pub clock: Clock,
     pub metrics: crate::metrics::Metrics,
+    /// The admin token, read from a file on the operator's machine. None disables the admin
+    /// routes entirely. Member tokens are never accepted here.
+    pub admin_token: Option<String>,
+}
+
+/// Compare two secrets without stopping at the first difference, so the time taken does not
+/// reveal how much of the token matched. A length mismatch is refused immediately, which is
+/// safe: the length of the admin token is not secret.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// True when the request carries the admin token as `Authorization: Bearer <admin token>`.
+fn is_admin<S: Store + Send + 'static>(state: &AppState<S>, auth: Option<&str>) -> bool {
+    match (&state.admin_token, auth.and_then(|a| a.strip_prefix("Bearer "))) {
+        (Some(expected), Some(given)) => constant_time_eq(expected.as_bytes(), given.as_bytes()),
+        _ => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateBody { space: String, members: Vec<String> }
+
+#[derive(Deserialize)]
+struct InviteBody { space: String, member: String }
+
+/// Create a team. Admin only. Returns the authenticator secret as an otpauth URI, once; the
+/// server does not keep it anywhere it can be read back.
+async fn admin_create<S: Store + Send + 'static>(State(s): State<Shared<S>>, headers: HeaderMap, body: Bytes) -> Response {
+    let auth = auth_header(&headers);
+    if !is_admin(&s, auth.as_deref()) {
+        return counted(&s, "admin", respond((403, json!({"error": "admin only"}))));
+    }
+    let body: CreateBody = match parse(&body) { Ok(b) => b, Err(r) => return r };
+    let r = run(s.clone(), move |svc, _| {
+        let members: Vec<&str> = body.members.iter().map(String::as_str).collect();
+        match svc.create_space(&body.space, &members) {
+            Ok(()) => {
+                let secret = svc.space_secret(&body.space).unwrap_or_default();
+                let uri = crate::totp::otpauth_uri(&secret, &body.space);
+                (200, json!({"space": body.space, "otpauth_uri": uri}))
+            }
+            Err(e) => crate::http::error_response(&e),
+        }
+    }).await;
+    counted(&s, "admin", r)
+}
+
+/// Invite a member to an existing team. Admin only.
+async fn admin_invite<S: Store + Send + 'static>(State(s): State<Shared<S>>, headers: HeaderMap, body: Bytes) -> Response {
+    let auth = auth_header(&headers);
+    if !is_admin(&s, auth.as_deref()) {
+        return counted(&s, "admin", respond((403, json!({"error": "admin only"}))));
+    }
+    let body: InviteBody = match parse(&body) { Ok(b) => b, Err(r) => return r };
+    let r = run(s.clone(), move |svc, _| match svc.invite(&body.space, &body.member) {
+        Ok(()) => (200, json!({"invited": body.member})),
+        Err(e) => crate::http::error_response(&e),
+    }).await;
+    counted(&s, "admin", r)
 }
 
 pub type Shared<S> = Arc<AppState<S>>;
@@ -150,6 +213,8 @@ async fn read_record<S: Store + Send + 'static>(State(s): State<Shared<S>>, head
 pub fn router<S: Store + Send + 'static>(state: Shared<S>) -> Router {
     Router::new()
         .route("/healthz", get(healthz::<S>))
+        .route("/admin/team", post(admin_create::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
+        .route("/admin/invite", post(admin_invite::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/metrics", get(metrics_route::<S>))
         .route("/enrol", post(enrol::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))
         .route("/lease/acquire", post(acquire::<S>).layer(DefaultBodyLimit::max(MAX_CONTROL_BODY)))

@@ -123,6 +123,11 @@ impl Space {
         format!("space:{}", self.name).into_bytes()
     }
 
+    /// Add a member. Idempotent: adding an existing member changes nothing.
+    pub fn add_member(&mut self, member: &str) {
+        self.members.insert(member.to_string());
+    }
+
     /// Seal content for the space, as `member`. Only members may write.
     pub fn seal_for(&mut self, member: &str, plaintext: &[u8]) -> Result<Vec<u8>, SpaceError> {
         if !self.members.contains(member) {

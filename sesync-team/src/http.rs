@@ -20,6 +20,7 @@ pub struct LeaseBody { pub space: String, pub conversation: String, pub machine:
 pub fn error_response(e: &ServiceError) -> (u16, Value) {
     match e {
         ServiceError::Unavailable => (503, json!({"error": "service unavailable, retry later"})),
+        ServiceError::Conflict(m) => (409, json!({"error": m})),
         ServiceError::NoSpace(_) => (404, json!({"error": "no such space"})),
         ServiceError::NotMember(_) => (403, json!({"error": "not a member"})),
         ServiceError::Auth(_) => (401, json!({"error": "authentication refused"})),
