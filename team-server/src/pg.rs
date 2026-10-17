@@ -55,6 +55,24 @@ impl PgStore {
         }
     }
 
+    /// Create any missing tables, never drop or change existing ones. Safe on a live database,
+    /// and safe to run on every start. (`reset` is for tests only: it drops everything.)
+    pub fn migrate(&self) -> Result<(), String> {
+        self.client.borrow_mut().batch_execute(
+            "CREATE TABLE IF NOT EXISTS spaces (name TEXT PRIMARY KEY, wrapped BYTEA NOT NULL);
+             CREATE TABLE IF NOT EXISTS records (space TEXT NOT NULL, conversation TEXT NOT NULL,
+                 sealed BYTEA NOT NULL, PRIMARY KEY (space, conversation));
+             CREATE TABLE IF NOT EXISTS gates (space TEXT NOT NULL, machine TEXT NOT NULL, state BYTEA NOT NULL,
+                 PRIMARY KEY (space, machine));
+             CREATE TABLE IF NOT EXISTS backups (space TEXT PRIMARY KEY, policy TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS owners (space TEXT NOT NULL, machine TEXT NOT NULL, member TEXT NOT NULL,
+                 PRIMARY KEY (space, machine));",
+        ).map_err(|e| match e.as_db_error() {
+            Some(db) => format!("{}: {}", db.code().code(), db.message()),
+            None => e.to_string(),
+        })
+    }
+
     /// Create the tables. For tests and first start; migrations come later.
     pub fn reset(&self) -> Result<(), String> {
         self.client.borrow_mut().batch_execute(
